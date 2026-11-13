@@ -1,0 +1,19 @@
+name: Не засинати
+
+# GitHub вимикає розклад у репозиторіях без активності 60 днів.
+# Раз на місяць підтверджуємо, що перевірка має працювати далі.
+on:
+  schedule:
+    - cron: "17 6 1 * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh workflow enable check.yml -R "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}

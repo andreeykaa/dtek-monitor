@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+.wrangler/
+worker/deploy.log
+worker/secrets.json
+.env

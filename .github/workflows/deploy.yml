@@ -1,0 +1,107 @@
+name: Розгортання бота
+
+on:
+  push:
+    branches: [main]
+    paths: ["worker/**", ".github/workflows/deploy.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write   # щоб одразу запустити першу перевірку
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: worker
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      GH_DISPATCH_TOKEN: ${{ secrets.GH_DISPATCH_TOKEN }}
+      WRANGLER: npx --yes wrangler@4
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Перевірка секретів
+        run: |
+          ok=1
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID TG_TOKEN; do
+            if [ -z "${!v}" ]; then echo "::error::Не задано секрет ${v/TG_TOKEN/TELEGRAM_BOT_TOKEN}"; ok=0; fi
+          done
+          [ -z "$GH_DISPATCH_TOKEN" ] && echo "::warning::GH_DISPATCH_TOKEN не задано — нові адреси перевірятимуться до 10 хв замість 1–2"
+          [ "$ok" = 1 ]
+
+      - name: База даних D1
+        run: |
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/d1/database"
+          AUTH="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+          ID=$(curl -fsS -H "$AUTH" "$API?name=dtek-monitor" | jq -r '.result[] | select(.name=="dtek-monitor") | .uuid' | head -1)
+          if [ -z "$ID" ]; then
+            echo "Створюю базу D1..."
+            ID=$(curl -fsS -X POST -H "$AUTH" -H "Content-Type: application/json" \
+                 -d '{"name":"dtek-monitor"}' "$API" | jq -r '.result.uuid')
+          fi
+          [ -n "$ID" ] && [ "$ID" != "null" ] || { echo "::error::Не вдалося створити базу D1 — перевірте дозвіл D1 Edit у токені Cloudflare"; exit 1; }
+          sed -i "s/__D1_ID__/$ID/" wrangler.toml
+          # створити таблиці (безпечно для повторного запуску)
+          sed 's/--.*$//' schema.sql | tr '\n' ' ' | tr ';' '\n' | while read -r STMT; do
+            [ -z "${STMT// }" ] && continue
+            curl -fsS -X POST -H "$AUTH" -H "Content-Type: application/json" \
+              -d "$(jq -n --arg s "$STMT" '{sql:$s}')" "$API/$ID/query" | jq -e '.success' >/dev/null \
+              || { echo "::error::Помилка створення таблиць"; exit 1; }
+          done
+          echo "База готова: $ID"
+
+      - name: Розгорнути Worker
+        run: |
+          $WRANGLER deploy 2>&1 | tee deploy.log
+          URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -1)
+          if [ -z "$URL" ]; then
+            SUB=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" | jq -r '.result.subdomain')
+            [ -n "$SUB" ] && [ "$SUB" != "null" ] && URL="https://dtek-monitor.$SUB.workers.dev"
+          fi
+          [ -n "$URL" ] || { echo "::error::Не знайдено адресу Worker. Відкрийте Cloudflare → Workers & Pages і оберіть піддомен workers.dev"; exit 1; }
+          echo "WORKER_URL=$URL" >> "$GITHUB_ENV"
+          echo "Бот розгорнуто: $URL"
+
+      - name: Секрети Worker
+        run: |
+          WEBHOOK_SECRET=$(printf '%s' "$TG_TOKEN" | sha256sum | cut -c1-48)
+          echo "::add-mask::$WEBHOOK_SECRET"
+          echo "WEBHOOK_SECRET=$WEBHOOK_SECRET" >> "$GITHUB_ENV"
+          jq -n --arg a "$TG_TOKEN" --arg b "$WEBHOOK_SECRET" --arg c "$GH_DISPATCH_TOKEN" --arg d "$GITHUB_REPOSITORY" \
+            '{TELEGRAM_BOT_TOKEN:$a, WEBHOOK_SECRET:$b, GH_TOKEN:$c, GH_REPO:$d} | with_entries(select(.value != ""))' > secrets.json
+          $WRANGLER secret bulk secrets.json
+          rm -f secrets.json
+
+      - name: Підключити Telegram
+        run: |
+          TG="https://api.telegram.org/bot$TG_TOKEN"
+          curl -fsS "$TG/setWebhook" -H "Content-Type: application/json" -d "$(jq -n \
+            --arg url "$WORKER_URL/telegram" --arg s "$WEBHOOK_SECRET" \
+            '{url:$url, secret_token:$s, allowed_updates:["message","callback_query"]}')" | jq -e '.ok' >/dev/null \
+            || { echo "::error::Telegram не прийняв webhook — перевірте TELEGRAM_BOT_TOKEN"; exit 1; }
+          curl -fsS "$TG/setMyCommands" -H "Content-Type: application/json" -d '{"commands":[
+            {"command":"status","description":"Поточний графік"},
+            {"command":"address","description":"Змінити адресу"},
+            {"command":"stop","description":"Відписатися від сповіщень"},
+            {"command":"start","description":"Почати / підписатися знову"}]}' >/dev/null
+          curl -fsS "$TG/setMyShortDescription" -H "Content-Type: application/json" \
+            -d '{"short_description":"Сповіщення про зміни графіка відключень ДТЕК Київські електромережі за вашою адресою"}' >/dev/null
+          curl -fsS "$TG/setMyDescription" -H "Content-Type: application/json" \
+            -d '{"description":"⚡ Стежу за графіком відключень ДТЕК Київські електромережі за вашою адресою і пишу, коли графік на сьогодні змінюється або з'"'"'являється графік на завтра.\n\nНатисніть «Почати», щоб вказати адресу."}' >/dev/null
+          echo "Telegram підключено ✅"
+
+      - name: Перша перевірка
+        run: gh workflow run check.yml -R "$GITHUB_REPOSITORY" || true
+        env:
+          GH_TOKEN: ${{ github.token }}

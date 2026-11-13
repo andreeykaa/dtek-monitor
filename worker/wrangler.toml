@@ -1,0 +1,9 @@
+name = "dtek-monitor"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "dtek-monitor"
+database_id = "__D1_ID__"   # підставляється автоматично під час розгортання
