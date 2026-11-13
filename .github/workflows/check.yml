@@ -12,10 +12,10 @@ on:
         type: string
 
 run-name: >-
-  ${{ inputs.reason == 'cron' && '⏰ За розкладом'
-   || inputs.reason == 'address' && '📍 Нова адреса'
-   || inputs.reason == 'deploy' && '🚀 Після розгортання'
-   || '▶️ Вручну' }}
+  ${{ inputs.reason == 'cron' && 'За розкладом'
+   || inputs.reason == 'address' && 'Нова адреса'
+   || inputs.reason == 'deploy' && 'Після розгортання'
+   || 'Вручну' }}
 
 concurrency:
   group: check
