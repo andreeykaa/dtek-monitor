@@ -20,9 +20,10 @@ const WELCOME =
   "Щоб я працював правильно, вкажіть адресу так само, як на офіційному сайті ДТЕК.";
 
 const ASK_STREET =
-  "📍 Введіть назву <b>вулиці</b> українською — можна без «вул.» чи «просп.».\n" +
-  "Наприклад: <i>Голосіївський</i> або <i>Хрещатик</i>.\n\n" +
-  "Я запропоную точні варіанти з сайту ДТЕК.";
+  "📍 Введіть <b>лише назву вулиці</b>, без номера будинку — номер я попрошу наступним кроком.\n\n" +
+  "✅ <i>Голосіївський</i>\n" +
+  "❌ <i>Голосіївський 7</i>\n\n" +
+  "Можна без «вул.» чи «просп.» — я запропоную точні варіанти з сайту ДТЕК.";
 
 const HELP =
   "Що я вмію:\n" +
@@ -166,6 +167,7 @@ async function checkTokenExpiry(env, header) {
 
 async function askStreet(env, chatId, intro = "") {
   await setUser(env, chatId, { state: "awaiting_street" });
+  await setHint(env, chatId, null);
   await send(env, chatId, (intro ? intro + "\n\n" : "") + ASK_STREET, {
     reply_markup: { remove_keyboard: true },
   });
@@ -180,13 +182,55 @@ async function chooseStreet(env, chatId, street) {
   );
 }
 
+// «Голосіївський 7», «просп. Голосіївський, 7а», «Хрещатик буд. 5/2» -> {street, house}
+export function splitHouse(text) {
+  const m = String(text)
+    .trim()
+    .match(/^(.+?)[\s,]+(?:буд(?:инок)?\.?\s*|б\.\s*|№\s*)?(\d{1,4}(?:\s*-?\s*[а-яґєіїa-z])?(?:\s*[\/-]\s*\d{1,4}(?:\s*-?\s*[а-яґєіїa-z])?)?)\s*$/iu);
+  if (!m || !/\p{L}/u.test(m[1])) return null;
+  return { street: m[1].trim(), house: m[2].replace(/\s+/g, "").replace(/(\d)-(\p{L})$/u, "$1$2") };
+}
+
+// номер будинку, який людина вказала разом з вулицею (поки обирає вулицю)
+async function setHint(env, chatId, house) {
+  const key = `hint:${chatId}`;
+  if (house == null) return env.DB.prepare("DELETE FROM meta WHERE key = ?").bind(key).run();
+  return env.DB.prepare(
+    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+  )
+    .bind(key, house)
+    .run();
+}
+
+async function takeHint(env, chatId) {
+  const row = await env.DB.prepare("SELECT value FROM meta WHERE key = ?").bind(`hint:${chatId}`).first();
+  if (row) await setHint(env, chatId, null);
+  return row?.value ?? null;
+}
+
 async function onStreetText(env, chatId, text) {
   const streets = await loadStreets(env);
+  // спершу шукаємо як є (бувають вулиці з цифрами: «8 Березня»),
+  // не знайшли — пробуємо відокремити номер будинку в кінці
+  let found = streets.length ? searchStreets(streets, text) : { total: 0, items: [] };
+  let hint = null;
+  if (!found.total) {
+    const split = splitHouse(text);
+    if (split) {
+      const again = streets.length ? searchStreets(streets, split.street) : { total: 0, items: [] };
+      if (again.total || !streets.length) {
+        found = again;
+        hint = split.house;
+        text = split.street;
+      }
+    }
+  }
+  await setHint(env, chatId, hint);
   if (!streets.length) {
     // список вулиць ще не завантажено — приймаємо як є, перевірка уточнить
-    return chooseStreet(env, chatId, text.trim());
+    return hint ? submitHouse(env, chatId, text.trim(), hint) : chooseStreet(env, chatId, text.trim());
   }
-  const { total, items } = searchStreets(streets, text);
+  const { total, items } = found;
   if (!total) {
     return send(
       env,
@@ -195,7 +239,8 @@ async function onStreetText(env, chatId, text) {
     );
   }
   const more = total > items.length ? `\n\nЗнайдено ${total} варіантів — якщо вашої немає, уточніть назву.` : "";
-  await send(env, chatId, `Оберіть вашу вулицю:${more}`, {
+  const note = hint ? `\n🏠 Будинок <b>${esc(hint)}</b> — запам'ятав, вводити ще раз не треба.` : "";
+  await send(env, chatId, `Оберіть вашу вулицю:${note}${more}`, {
     reply_markup: {
       inline_keyboard: items.map((s) => [{ text: s.name, callback_data: `st:${s.id}` }]),
     },
@@ -207,12 +252,16 @@ async function onHouseText(env, chatId, user, text) {
   if (!house || house.length > 20) {
     return send(env, chatId, "Введіть, будь ласка, лише номер будинку (напр. <i>7</i> або <i>12а</i>).");
   }
-  await setUser(env, chatId, { state: "pending", house });
+  return submitHouse(env, chatId, user.street, house);
+}
+
+async function submitHouse(env, chatId, street, house) {
+  await setUser(env, chatId, { state: "pending", street, house });
   const fast = await triggerCheck(env, "address");
   await send(
     env,
     chatId,
-    `📍 <b>${esc(user.street)}, ${esc(house)}</b>\n\n⏳ Перевіряю адресу на сайті ДТЕК — це займе ${fast ? "1–2 хвилини" : "до 10 хвилин"}. Я напишу, щойно буде результат.`
+    `📍 <b>${esc(street)}, ${esc(house)}</b>\n\n⏳ Перевіряю адресу на сайті ДТЕК — це займе ${fast ? "1–2 хвилини" : "до 10 хвилин"}. Я напишу, щойно буде результат.`
   );
 }
 
@@ -334,7 +383,8 @@ async function onCallback(env, cb) {
   if (!row) return send(env, chatId, "Список вулиць оновився — введіть назву ще раз.");
 
   await clearButtons();
-  return chooseStreet(env, chatId, row.name);
+  const hint = await takeHint(env, chatId);
+  return hint ? submitHouse(env, chatId, row.name, hint) : chooseStreet(env, chatId, row.name);
 }
 
 // ---------------------------------------------------------------- розклад
