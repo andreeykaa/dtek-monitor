@@ -11,3 +11,7 @@ crons = ["*/15 * * * *"]
 binding = "DB"
 database_name = "dtek-monitor"
 database_id = "__D1_ID__"   # підставляється автоматично під час розгортання
+
+# Журнали в Cloudflare (Workers & Pages → dtek-monitor → Observability)
+[observability]
+enabled = true
