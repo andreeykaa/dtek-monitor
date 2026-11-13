@@ -45,10 +45,10 @@ jobs:
         run: |
           API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/d1/database"
           AUTH="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
-          ID=$(curl -fsS -H "$AUTH" "$API?name=dtek-monitor" | jq -r '.result[] | select(.name=="dtek-monitor") | .uuid' | head -1)
+          ID=$(curl -fsS --retry 4 --retry-all-errors --retry-delay 3 -H "$AUTH" "$API?name=dtek-monitor" | jq -r '.result[] | select(.name=="dtek-monitor") | .uuid' | head -1)
           if [ -z "$ID" ]; then
             echo "Створюю базу D1..."
-            ID=$(curl -fsS -X POST -H "$AUTH" -H "Content-Type: application/json" \
+            ID=$(curl -fsS --retry 4 --retry-all-errors --retry-delay 3 -X POST -H "$AUTH" -H "Content-Type: application/json" \
                  -d '{"name":"dtek-monitor"}' "$API" | jq -r '.result.uuid')
           fi
           [ -n "$ID" ] && [ "$ID" != "null" ] || { echo "::error::Не вдалося створити базу D1 — перевірте дозвіл D1 Edit у токені Cloudflare"; exit 1; }
@@ -56,12 +56,12 @@ jobs:
           # створити таблиці (безпечно для повторного запуску)
           sed 's/--.*$//' schema.sql | tr '\n' ' ' | tr ';' '\n' | while read -r STMT; do
             [ -z "${STMT// }" ] && continue
-            curl -fsS -X POST -H "$AUTH" -H "Content-Type: application/json" \
+            curl -fsS --retry 4 --retry-all-errors --retry-delay 3 -X POST -H "$AUTH" -H "Content-Type: application/json" \
               -d "$(jq -n --arg s "$STMT" '{sql:$s}')" "$API/$ID/query" | jq -e '.success' >/dev/null \
               || { echo "::error::Помилка створення таблиць"; exit 1; }
           done
           # імена користувачів не зберігаємо — стерти, якщо лишились
-          curl -fsS -X POST -H "$AUTH" -H "Content-Type: application/json" \
+          curl -fsS --retry 4 --retry-all-errors --retry-delay 3 -X POST -H "$AUTH" -H "Content-Type: application/json" \
             -d '{"sql":"UPDATE users SET name = NULL WHERE name IS NOT NULL"}' "$API/$ID/query" | jq -e '.success' >/dev/null
           echo "База готова: $ID"
 
@@ -70,7 +70,7 @@ jobs:
           $WRANGLER deploy 2>&1 | tee deploy.log
           URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -1)
           if [ -z "$URL" ]; then
-            SUB=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            SUB=$(curl -fsS --retry 4 --retry-all-errors --retry-delay 3 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
               "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" | jq -r '.result.subdomain')
             [ -n "$SUB" ] && [ "$SUB" != "null" ] && URL="https://dtek-monitor.$SUB.workers.dev"
           fi
@@ -91,18 +91,18 @@ jobs:
       - name: Підключити Telegram
         run: |
           TG="https://api.telegram.org/bot$TG_TOKEN"
-          curl -fsS "$TG/setWebhook" -H "Content-Type: application/json" -d "$(jq -n \
+          curl -fsS --retry 4 --retry-all-errors --retry-delay 3 "$TG/setWebhook" -H "Content-Type: application/json" -d "$(jq -n \
             --arg url "$WORKER_URL/telegram" --arg s "$WEBHOOK_SECRET" \
             '{url:$url, secret_token:$s, allowed_updates:["message","callback_query"]}')" | jq -e '.ok' >/dev/null \
             || { echo "::error::Telegram не прийняв webhook — перевірте TELEGRAM_BOT_TOKEN"; exit 1; }
-          curl -fsS "$TG/setMyCommands" -H "Content-Type: application/json" -d '{"commands":[
+          curl -fsS --retry 4 --retry-all-errors --retry-delay 3 "$TG/setMyCommands" -H "Content-Type: application/json" -d '{"commands":[
             {"command":"status","description":"Поточний графік"},
             {"command":"address","description":"Змінити адресу"},
             {"command":"stop","description":"Відписатися від сповіщень"},
             {"command":"start","description":"Почати / підписатися знову"}]}' >/dev/null
-          curl -fsS "$TG/setMyShortDescription" -H "Content-Type: application/json" \
+          curl -fsS --retry 4 --retry-all-errors --retry-delay 3 "$TG/setMyShortDescription" -H "Content-Type: application/json" \
             -d '{"short_description":"Сповіщення про зміни графіка відключень ДТЕК Київські електромережі за вашою адресою"}' >/dev/null
-          curl -fsS "$TG/setMyDescription" -H "Content-Type: application/json" \
+          curl -fsS --retry 4 --retry-all-errors --retry-delay 3 "$TG/setMyDescription" -H "Content-Type: application/json" \
             -d '{"description":"⚡ Стежу за графіком відключень ДТЕК Київські електромережі за вашою адресою і пишу, коли графік на сьогодні змінюється або з'"'"'являється графік на завтра.\n\nНатисніть «Почати», щоб вказати адресу."}' >/dev/null
           echo "Telegram підключено ✅"
 
