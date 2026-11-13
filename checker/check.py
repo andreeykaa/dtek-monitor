@@ -134,6 +134,13 @@ async ({streets}) => {
       .match(/DisconSchedule\.fact\s*=\s*(\{[\s\S]*?\})\s*(?:;|<\/script>)/);
     if (m) { try { fact = JSON.parse(m[1]); } catch (e) {} }
   }
+  if (!fact || !fact.data || !Object.keys(fact.data).length) {
+    // сторінка без графіка — повертаємо діагностику, без запитів по вулицях
+    let ds = null;
+    try { ds = typeof DisconSchedule !== 'undefined' ? Object.keys(DisconSchedule) : null; } catch (e) {}
+    return {fact: null, diag: {title: document.title, url: location.href, disconKeys: ds,
+            factKeys: fact ? Object.keys(fact) : null, htmlLen: document.documentElement.outerHTML.length}};
+  }
   const houses = {};
   const queue = [...streets];
   const worker = async () => { while (queue.length) { const street = queue.shift();
@@ -181,12 +188,15 @@ def fetch_site(streets):
                         timeout=45000,
                     )
                     page.wait_for_timeout(1500)
-                    return page.evaluate(FETCH_JS, {"streets": sorted(streets)})
+                    res = page.evaluate(FETCH_JS, {"streets": sorted(streets)})
+                    if not res.get("fact"):
+                        raise RuntimeError(f"сторінка без графіка {json.dumps(res.get('diag'), ensure_ascii=False)}")
+                    return res
                 except Exception as e:
                     last_err = e
                     log(f"Спроба {attempt + 1}: {str(e).splitlines()[0]}")
-                    page.wait_for_timeout(5000)
-            raise RuntimeError(f"Сайт ДТЕК не завантажився: {last_err}")
+                    page.wait_for_timeout(10000)
+            raise RuntimeError(f"Сайт ДТЕК не віддав графік після 3 спроб: {str(last_err).splitlines()[0]}")
         finally:
             browser.close()
 
@@ -575,10 +585,12 @@ def hc_ping(suffix="", body=""):
 
 
 if __name__ == "__main__":
+    # Разову помилку лише записуємо у «сторожа» (/log) — тривогу він підніме сам,
+    # якщо вдалих перевірок не буде довше Period + Grace (30 хв).
     try:
         code = main()
     except Exception as e:
-        hc_ping("/fail", f"{type(e).__name__}: {e}")
+        hc_ping("/log", f"{type(e).__name__}: {e}")
         raise
-    hc_ping("" if code == 0 else "/fail")
+    hc_ping("" if code == 0 else "/log")
     sys.exit(code)
