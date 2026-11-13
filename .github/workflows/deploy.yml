@@ -22,6 +22,7 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       GH_DISPATCH_TOKEN: ${{ secrets.GH_DISPATCH_TOKEN }}
+      ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
       WRANGLER: npx --yes wrangler@4
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +37,8 @@ jobs:
           for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID TG_TOKEN; do
             if [ -z "${!v}" ]; then echo "::error::Не задано секрет ${v/TG_TOKEN/TELEGRAM_BOT_TOKEN}"; ok=0; fi
           done
-          [ -z "$GH_DISPATCH_TOKEN" ] && echo "::warning::GH_DISPATCH_TOKEN не задано — нові адреси перевірятимуться до 10 хв замість 1–2"
+          if [ -z "$GH_DISPATCH_TOKEN" ]; then echo "::error::Не задано секрет GH_DISPATCH_TOKEN — без нього перевірки не запускатимуться"; ok=0; fi
+          [ -z "$ADMIN_CHAT_ID" ] && echo "::warning::ADMIN_CHAT_ID не задано — ви не отримаєте попередження, якщо перевірки перестануть запускатися"
           [ "$ok" = 1 ]
 
       - name: База даних D1
@@ -81,8 +83,8 @@ jobs:
           WEBHOOK_SECRET=$(printf '%s' "$TG_TOKEN" | sha256sum | cut -c1-48)
           echo "::add-mask::$WEBHOOK_SECRET"
           echo "WEBHOOK_SECRET=$WEBHOOK_SECRET" >> "$GITHUB_ENV"
-          jq -n --arg a "$TG_TOKEN" --arg b "$WEBHOOK_SECRET" --arg c "$GH_DISPATCH_TOKEN" --arg d "$GITHUB_REPOSITORY" \
-            '{TELEGRAM_BOT_TOKEN:$a, WEBHOOK_SECRET:$b, GH_TOKEN:$c, GH_REPO:$d} | with_entries(select(.value != ""))' > secrets.json
+          jq -n --arg a "$TG_TOKEN" --arg b "$WEBHOOK_SECRET" --arg c "$GH_DISPATCH_TOKEN" --arg d "$GITHUB_REPOSITORY" --arg e "$ADMIN_CHAT_ID" \
+            '{TELEGRAM_BOT_TOKEN:$a, WEBHOOK_SECRET:$b, GH_TOKEN:$c, GH_REPO:$d, ADMIN_CHAT_ID:$e} | with_entries(select(.value != ""))' > secrets.json
           $WRANGLER secret bulk secrets.json
           rm -f secrets.json
 

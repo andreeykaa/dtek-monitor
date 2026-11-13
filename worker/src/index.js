@@ -268,9 +268,40 @@ async function onCallback(env, cb) {
   return chooseStreet(env, chatId, row.name);
 }
 
+// ---------------------------------------------------------------- розклад
+
+// Cloudflare Cron (wrangler.toml) кожні 15 хв запускає перевірку на GitHub.
+// Розклад GitHub Actions ненадійний, тож запускаємо самі.
+async function onSchedule(env) {
+  const ok = await triggerCheck(env);
+  const alerted = await env.DB.prepare("SELECT value FROM meta WHERE key = 'dispatch_alert'").first();
+  if (ok && alerted) {
+    await env.DB.prepare("DELETE FROM meta WHERE key = 'dispatch_alert'").run();
+    if (env.ADMIN_CHAT_ID) await send(env, env.ADMIN_CHAT_ID, "✅ Перевірки графіка знову запускаються.");
+  }
+  if (!ok && !alerted) {
+    await env.DB.prepare("INSERT INTO meta (key, value) VALUES ('dispatch_alert', ?)")
+      .bind(new Date().toISOString())
+      .run();
+    if (env.ADMIN_CHAT_ID) {
+      await send(
+        env,
+        env.ADMIN_CHAT_ID,
+        "⚠️ <b>ДТЕК Монітор:</b> не вдається запустити перевірку на GitHub.\n\n" +
+          "Найімовірніше, закінчився термін дії <code>GH_DISPATCH_TOKEN</code> — створіть новий, " +
+          "оновіть секрет і запустіть «Розгортання бота»."
+      );
+    }
+  }
+}
+
 // ---------------------------------------------------------------- entry
 
 export default {
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(onSchedule(env).catch((e) => console.error("schedule error:", e?.stack || e)));
+  },
+
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/telegram") {

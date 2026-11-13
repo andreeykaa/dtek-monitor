@@ -16,9 +16,11 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -132,7 +134,8 @@ async ({streets}) => {
     if (m) { try { fact = JSON.parse(m[1]); } catch (e) {} }
   }
   const houses = {};
-  for (const street of streets) {
+  const queue = [...streets];
+  const worker = async () => { while (queue.length) { const street = queue.shift();
     const body = new URLSearchParams();
     body.append('data[0][name]', 'street');
     body.append('data[0][value]', street);
@@ -148,8 +151,9 @@ async ({streets}) => {
       try { houses[street] = JSON.parse(text); }
       catch (e) { houses[street] = {error: `HTTP ${r.status}: ${text.slice(0, 200)}`}; }
     } catch (e) { houses[street] = {error: String(e)}; }
-    await new Promise(r => setTimeout(r, 400));
-  }
+    await new Promise(r => setTimeout(r, 300));
+  } };
+  await Promise.all([worker(), worker(), worker()]);  // по 3 запити одночасно
   return {fact, allStreets, houses};
 }
 """
@@ -323,6 +327,88 @@ def similar_houses(houses: dict, house: str, limit=15):
     return keys[:limit]
 
 
+# ============================================================ швидкодія
+
+REFRESH_PER_RUN = 15                 # скільки вулиць активних користувачів перепитувати за запуск
+REFRESH_AFTER = timedelta(hours=12)  # як часто перевіряти, чи не змінилась група будинку
+SEND_THREADS = 8                     # паралельна розсилка
+SEND_RATE = 25                       # повідомлень/с (ліміт Telegram ~30)
+
+
+class RateLimiter:
+    def __init__(self, per_sec):
+        self.gap, self.next, self.lock = 1 / per_sec, 0.0, threading.Lock()
+
+    def wait(self):
+        with self.lock:
+            now = time.monotonic()
+            t = max(now, self.next)
+            self.next = t + self.gap
+        if t > now:
+            time.sleep(t - now)
+
+
+LIMITER = RateLimiter(SEND_RATE)
+
+
+def send_user(cid, msgs):
+    for text, keyboard in msgs:
+        LIMITER.wait()
+        st = tg_send(cid, text, keyboard)
+        if st != "ok":
+            return st
+    return "ok"
+
+
+def send_all(outbox: dict) -> dict:
+    """outbox: {chat_id: [(text, keyboard), ...]} -> {chat_id: 'ok'|'blocked'|'error'}"""
+    if not outbox:
+        return {}
+    with ThreadPoolExecutor(SEND_THREADS) as ex:
+        return dict(zip(outbox, ex.map(lambda c: send_user(c, outbox[c]), outbox)))
+
+
+# Одне оновлення бази на багато користувачів (json_each), з перевіркою,
+# що користувач не змінив адресу, поки йшла перевірка.
+UPDATE_SQL = """
+UPDATE users SET
+  state = j.value->>'state', house = j.value->>'house', grp = j.value->>'grp',
+  last_days = j.value->>'last_days', last_text = j.value->>'last_text',
+  updated_at = CURRENT_TIMESTAMP
+FROM json_each(?) AS j
+WHERE users.chat_id = j.value->>'chat_id'
+  AND users.state = j.value->>'old_state'
+  AND users.street = j.value->>'street'
+  AND users.house = j.value->>'old_house'
+"""
+
+
+def apply_updates(db, updates: list):
+    chunk, size = [], 0
+    for u in updates + [None]:
+        n = len(json.dumps(u, ensure_ascii=False).encode()) if u else 0
+        if chunk and (u is None or size + n > 700_000):
+            db.q(UPDATE_SQL, json.dumps(chunk, ensure_ascii=False))
+            chunk, size = [], 0
+        if u:
+            chunk.append(u)
+            size += n
+
+
+def sync_streets(db, streets):
+    h = hashlib.sha256("\n".join(streets).encode()).hexdigest()
+    prev = db.q("SELECT value FROM meta WHERE key = 'streets_hash'")
+    if prev and prev[0]["value"] == h:
+        return
+    payload = json.dumps(streets, ensure_ascii=False)
+    # id наявних вулиць не змінюються — кнопки в старих повідомленнях працюють
+    db.q("DELETE FROM streets WHERE name NOT IN (SELECT value FROM json_each(?))", payload)
+    db.q("INSERT OR IGNORE INTO streets (name) SELECT value FROM json_each(?)", payload)
+    db.q("INSERT INTO meta (key, value) VALUES ('streets_hash', ?) "
+         "ON CONFLICT(key) DO UPDATE SET value = excluded.value", h)
+    log(f"Оновлено список вулиць: {len(streets)}")
+
+
 # ============================================================ основне
 
 def main() -> int:
@@ -332,88 +418,101 @@ def main() -> int:
         log(f"Не задано секрети: {', '.join(missing)}")
         return 1
 
+    started = time.monotonic()
     db = D1()
     users = db.q("SELECT chat_id, state, street, house, grp, last_days, last_text FROM users "
                  "WHERE state IN ('active', 'pending') AND street IS NOT NULL AND house IS NOT NULL")
-    log(f"Користувачів: {len(users)} (нових адрес: {sum(u['state'] == 'pending' for u in users)})")
+    pending = [u for u in users if u["state"] == "pending"]
 
-    site = fetch_site({u["street"] for u in users})
+    # Які вулиці питати в ДТЕК: нові адреси + кілька найдавніше перевірених (раптом змінилась група).
+    # Для решти активних беремо збережену групу — графік усіх груп і так є на сторінці.
+    now = datetime.now(KYIV)
+    checked = {r["key"][7:]: r["value"] for r in db.q("SELECT key, value FROM meta WHERE key LIKE 'street:%'")}
+    need = {u["street"] for u in pending} | {u["street"] for u in users if u["state"] == "active" and not u["grp"]}
+    stale = sorted(
+        (s for s in {u["street"] for u in users if u["state"] == "active"} - need
+         if s not in checked or datetime.fromisoformat(checked[s]) < now - REFRESH_AFTER),
+        key=lambda s: checked.get(s, ""),
+    )
+    query = need | set(stale[:REFRESH_PER_RUN])
+    log(f"Користувачів: {len(users)} (нових адрес: {len(pending)}), запитів вулиць до ДТЕК: {len(query)}")
+
+    site = fetch_site(query)
     fact = site.get("fact") or {}
     if not fact.get("data"):
         raise RuntimeError("На сторінці не знайдено графік (DisconSchedule.fact)")
     update = fact.get("update", "")
+    houses_by_street = {s: r for s, r in (site.get("houses") or {}).items() if not r.get("error")}
+    for s, r in (site.get("houses") or {}).items():
+        if r.get("error"):
+            log(f"Помилка запиту вулиці ({len(r['error'])} симв.)")
 
-    # --- список вулиць для пошуку в боті
     streets = flatten_streets(site.get("allStreets"))
     if streets:
-        h = hashlib.sha256("\n".join(streets).encode()).hexdigest()
-        prev = db.q("SELECT value FROM meta WHERE key = 'streets_hash'")
-        if not prev or prev[0]["value"] != h:
-            db.q("DELETE FROM streets")
-            for i in range(0, len(streets), 90):
-                chunk = streets[i:i + 90]
-                db.q("INSERT OR IGNORE INTO streets (name) VALUES " + ",".join(["(?)"] * len(chunk)), *chunk)
-            db.q("INSERT INTO meta (key, value) VALUES ('streets_hash', ?) "
-                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value", h)
-            log(f"Оновлено список вулиць: {len(streets)}")
+        sync_streets(db, streets)
     else:
         log("⚠️ Список вулиць на сторінці не знайдено")
 
-    sent = 0
+    outbox, updates = {}, {}
+
+    def upd(u, **new):
+        row = {"chat_id": u["chat_id"], "old_state": u["state"], "street": u["street"], "old_house": u["house"],
+               "state": u["state"], "house": u["house"], "grp": u["grp"],
+               "last_days": u["last_days"], "last_text": u["last_text"]}
+        row.update(new)
+        updates[u["chat_id"]] = row
+
     for u in users:
         cid, street, house = u["chat_id"], u["street"], u["house"]
-        resp = site["houses"].get(street) or {}
-        if resp.get("error"):
-            log(f"{anon(cid)}: помилка запиту вулиці")
-            continue
-        houses = resp.get("data") or {}
-        guard = ("chat_id = ? AND state = ? AND street = ? AND house = ?", cid, u["state"], street, house)
+        resp = houses_by_street.get(street)
+        houses = (resp or {}).get("data") or {}
 
         # ---------- нова адреса: перевірка
         if u["state"] == "pending":
+            if resp is None:
+                continue  # помилка запиту — спробуємо наступного разу
             if not houses:
-                db.q(f"UPDATE users SET state = 'awaiting_street', updated_at = CURRENT_TIMESTAMP WHERE {guard[0]}", *guard[1:])
-                tg_send(cid, f"😕 Не вдалося знайти вулицю «{html.escape(street)}» на сайті ДТЕК.\n\n"
-                             "Введіть назву вулиці ще раз.", keyboard=False)
+                upd(u, state="awaiting_street")
+                outbox[cid] = [(f"😕 Не вдалося знайти вулицю «{html.escape(street)}» на сайті ДТЕК.\n\n"
+                                "Введіть назву вулиці ще раз.", False)]
                 continue
             key = find_house(houses, house)
             if key is None:
-                db.q(f"UPDATE users SET state = 'awaiting_house', updated_at = CURRENT_TIMESTAMP WHERE {guard[0]}", *guard[1:])
+                upd(u, state="awaiting_house")
                 sim = ", ".join(similar_houses(houses, house))
-                tg_send(cid, f"😕 Будинок <b>{html.escape(house)}</b> не знайдено на {html.escape(street)}.\n\n"
-                             f"Є, наприклад: {html.escape(sim)}\n\nВведіть номер будинку ще раз.", keyboard=False)
+                outbox[cid] = [(f"😕 Будинок <b>{html.escape(house)}</b> не знайдено на {html.escape(street)}.\n\n"
+                                f"Є, наприклад: {html.escape(sim)}\n\nВведіть номер будинку ще раз.", False)]
                 continue
             groups = houses[key].get("sub_type_reason") or []
             grp = groups[0] if groups else ""
             days = days_for(fact, grp) if grp else {}
-            u2 = {**u, "house": key, "grp": grp}
-            text = status_text(u2, days, update)
+            text = status_text({**u, "house": key, "grp": grp}, days, update)
             if grp:
                 intro = (f"✅ <b>Адресу підтверджено!</b>\n📍 {html.escape(street)}, {html.escape(key)} · "
                          f"група {html.escape(group_name(grp))}\n\n"
                          "🔔 Я напишу, коли графік на сьогодні зміниться або з'явиться графік на завтра.")
+                outbox[cid] = [(intro, True), (text, True)]
             else:
-                intro = (f"✅ Адресу знайдено: {html.escape(street)}, {html.escape(key)}\n\n"
-                         "⚠️ Але ДТЕК не вказує для цього будинку групу відключень, тому графік відстежити не вийде.")
-            db.q(f"UPDATE users SET state = 'active', house = ?, grp = ?, last_days = ?, last_text = ?, "
-                 f"updated_at = CURRENT_TIMESTAMP WHERE {guard[0]}",
-                 key, grp, json.dumps(days), text if grp else None, *guard[1:])
-            tg_send(cid, intro)
-            if grp:
-                tg_send(cid, text)
-            sent += 1
+                outbox[cid] = [(f"✅ Адресу знайдено: {html.escape(street)}, {html.escape(key)}\n\n"
+                                "⚠️ Але ДТЕК не вказує для цього будинку групу відключень, "
+                                "тому графік відстежити не вийде.", True)]
+            upd(u, state="active", house=key, grp=grp, last_days=json.dumps(days),
+                last_text=text if grp else None)
             log(f"{anon(cid)}: адресу підтверджено ({group_name(grp) or 'без групи'})")
             continue
 
         # ---------- активний: пошук змін
-        key = find_house(houses, house)
-        if key is None:
-            log(f"{anon(cid)}: будинок зник зі списку ДТЕК — пропускаю")
-            continue
-        groups = houses[key].get("sub_type_reason") or []
-        grp = groups[0] if groups else ""
+        grp = u["grp"]
+        if resp is not None:  # вулицю щойно перепитали — уточнюємо групу
+            key = find_house(houses, house)
+            if key is None:
+                log(f"{anon(cid)}: будинок зник зі списку ДТЕК — лишаю збережену групу")
+            else:
+                groups = houses[key].get("sub_type_reason") or []
+                grp = groups[0] if groups else ""
         if not grp:
             continue
+
         days = days_for(fact, grp)
         old_days = json.loads(u["last_days"] or "{}")
         blocks, titles = [], []
@@ -433,19 +532,32 @@ def main() -> int:
 
         text = status_text({**u, "grp": grp}, days, update)
         if blocks:
-            msg = "\n\n".join([header_html(" · ".join(titles), street, house, grp)]
-                              + blocks + [footer_html(update)])
-            if tg_send(cid, msg) == "blocked":
-                db.q(f"UPDATE users SET state = 'stopped' WHERE {guard[0]}", *guard[1:])
-                log(f"{anon(cid)}: заблокував бота — відписано")
-                continue
-            sent += 1
+            outbox[cid] = [("\n\n".join([header_html(" · ".join(titles), street, house, grp)]
+                                        + blocks + [footer_html(update)]), True)]
         keep = {d: v for d, v in {**old_days, **days}.items() if d >= today_tomorrow()[0][0]}
         if keep != old_days or text != u["last_text"] or grp != u["grp"]:
-            db.q(f"UPDATE users SET grp = ?, last_days = ?, last_text = ? WHERE {guard[0]}",
-                 grp, json.dumps(keep), text, *guard[1:])
+            upd(u, grp=grp, last_days=json.dumps(keep), last_text=text)
 
-    log(f"Готово. Надіслано повідомлень: {sent}. Оновлено ДТЕК: {update}")
+    # ---------- розсилка (паралельно) і одне пакетне оновлення бази
+    results = send_all(outbox)
+    for cid, st in results.items():
+        if st == "blocked":
+            u = next(x for x in users if x["chat_id"] == cid)
+            updates.setdefault(cid, {"chat_id": cid, "old_state": u["state"], "street": u["street"],
+                                     "old_house": u["house"], "house": u["house"], "grp": u["grp"],
+                                     "last_days": u["last_days"], "last_text": u["last_text"]})
+            updates[cid]["state"] = "stopped"
+            log(f"{anon(cid)}: заблокував бота — відписано")
+    apply_updates(db, list(updates.values()))
+
+    if query:
+        db.q("INSERT INTO meta (key, value) SELECT 'street:' || j.value, ? FROM json_each(?) AS j WHERE true "
+             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+             now.isoformat(timespec="seconds"), json.dumps(sorted(houses_by_street), ensure_ascii=False))
+
+    ok = sum(st == "ok" for st in results.values())
+    log(f"Готово за {time.monotonic() - started:.0f} с. Надіслано: {ok} користувачам, "
+        f"оновлено записів: {len(updates)}. Оновлено ДТЕК: {update}")
     return 0
 
 

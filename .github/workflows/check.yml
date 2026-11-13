@@ -1,9 +1,9 @@
 name: Перевірка графіка
 
+# Запускається ззовні: кожні 15 хв — Cloudflare Cron (worker/wrangler.toml),
+# а також ботом одразу після введення нової адреси.
 on:
-  schedule:
-    - cron: "*/10 * * * *"   # кожні 10 хв (GitHub може запізнюватись на кілька хвилин)
-  workflow_dispatch:         # ручний запуск / запуск ботом після введення адреси
+  workflow_dispatch:
 
 concurrency:
   group: check

@@ -3,6 +3,10 @@ main = "src/index.js"
 compatibility_date = "2025-06-01"
 workers_dev = true
 
+# Як часто перевіряти графік (Cloudflare запускає перевірку на GitHub)
+[triggers]
+crons = ["*/15 * * * *"]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "dtek-monitor"
