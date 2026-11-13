@@ -270,7 +270,7 @@ async function onCallback(env, cb) {
 
 // ---------------------------------------------------------------- розклад
 
-// Cloudflare Cron (wrangler.toml) кожні 15 хв запускає перевірку на GitHub.
+// Cloudflare Cron (wrangler.toml) кожні 10 хв запускає перевірку на GitHub.
 // Розклад GitHub Actions ненадійний, тож запускаємо самі.
 async function onSchedule(env) {
   const ok = await triggerCheck(env, "cron");

@@ -5,7 +5,7 @@ workers_dev = true
 
 # Як часто перевіряти графік (Cloudflare запускає перевірку на GitHub)
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["*/10 * * * *"]
 
 [[d1_databases]]
 binding = "DB"

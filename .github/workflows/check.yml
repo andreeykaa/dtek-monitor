@@ -1,6 +1,6 @@
 name: Перевірка графіка
 
-# Запускається ззовні: кожні 15 хв — Cloudflare Cron (worker/wrangler.toml),
+# Запускається ззовні: кожні 10 хв — Cloudflare Cron (worker/wrangler.toml),
 # а також ботом одразу після введення нової адреси.
 on:
   workflow_dispatch:
