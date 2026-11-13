@@ -1,7 +1,7 @@
 -- Користувачі бота (одна людина — одна адреса)
 CREATE TABLE IF NOT EXISTS users (
   chat_id    INTEGER PRIMARY KEY,
-  name       TEXT,
+  name       TEXT,            -- не використовується (імена не зберігаються)
   -- awaiting_street | awaiting_house | pending | active | stopped
   state      TEXT NOT NULL DEFAULT 'awaiting_street',
   street     TEXT,

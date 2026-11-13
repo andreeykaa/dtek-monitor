@@ -58,6 +58,9 @@ jobs:
               -d "$(jq -n --arg s "$STMT" '{sql:$s}')" "$API/$ID/query" | jq -e '.success' >/dev/null \
               || { echo "::error::Помилка створення таблиць"; exit 1; }
           done
+          # імена користувачів не зберігаємо — стерти, якщо лишились
+          curl -fsS -X POST -H "$AUTH" -H "Content-Type: application/json" \
+            -d '{"sql":"UPDATE users SET name = NULL WHERE name IS NOT NULL"}' "$API/$ID/query" | jq -e '.success' >/dev/null
           echo "База готова: $ID"
 
       - name: Розгорнути Worker

@@ -129,8 +129,8 @@ async function triggerCheck(env) {
 
 // ---------------------------------------------------------------- dialog
 
-async function askStreet(env, chatId, name, intro = "") {
-  await setUser(env, chatId, { name, state: "awaiting_street" });
+async function askStreet(env, chatId, intro = "") {
+  await setUser(env, chatId, { state: "awaiting_street" });
   await send(env, chatId, (intro ? intro + "\n\n" : "") + ASK_STREET, {
     reply_markup: { remove_keyboard: true },
   });
@@ -202,14 +202,13 @@ async function showStatus(env, chatId, user) {
 async function onMessage(env, msg) {
   if (msg.chat?.type !== "private" || typeof msg.text !== "string") return;
   const chatId = msg.chat.id;
-  const name = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(" ") || null;
   const text = msg.text.trim();
   const cmd = text.startsWith("/") ? text.split(/[\s@]/)[0].toLowerCase() : null;
   const user = await getUser(env, chatId);
 
   if (cmd === "/start") {
     if (user?.street && user?.house && (user.state === "active" || user.state === "stopped")) {
-      await setUser(env, chatId, { name, state: "active" });
+      await setUser(env, chatId, { state: "active" });
       return send(
         env,
         chatId,
@@ -217,9 +216,9 @@ async function onMessage(env, msg) {
         { reply_markup: MAIN_KEYBOARD }
       );
     }
-    return askStreet(env, chatId, name, WELCOME);
+    return askStreet(env, chatId, WELCOME);
   }
-  if (cmd === "/address" || text === BTN_ADDRESS) return askStreet(env, chatId, name);
+  if (cmd === "/address" || text === BTN_ADDRESS) return askStreet(env, chatId);
   if (cmd === "/status" || text === BTN_SCHEDULE) return showStatus(env, chatId, user);
   if (cmd === "/stop") {
     if (user) await setUser(env, chatId, { state: "stopped" });
@@ -229,7 +228,7 @@ async function onMessage(env, msg) {
   }
   if (cmd === "/help") return send(env, chatId, HELP);
 
-  if (!user) return askStreet(env, chatId, name, WELCOME);
+  if (!user) return askStreet(env, chatId, WELCOME);
   if (cmd) return send(env, chatId, HELP);
 
   switch (user.state) {
