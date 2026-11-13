@@ -45,6 +45,11 @@ PERIOD = {"+": ("🟢", "світло"), "-": ("🔴", "без світла"), "
 WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"]
 
 
+def anon(chat_id) -> str:
+    """Анонімна мітка користувача для журналу (журнали публічні!)."""
+    return "user-" + hashlib.sha256(f"{TG_TOKEN}:{chat_id}".encode()).hexdigest()[:6]
+
+
 def log(msg: str) -> None:
     print(f"[{datetime.now(KYIV):%H:%M:%S}] {msg}", flush=True)
 
@@ -102,7 +107,7 @@ def tg_send(chat_id, text, keyboard=True) -> str:
             continue
         if code == 403 or "chat not found" in str(res.get("description", "")):
             return "blocked"
-        log(f"Telegram {chat_id}: {res.get('description')}")
+        log(f"Telegram {anon(chat_id)}: {res.get('description')}")
         return "error"
     return "error"
 
@@ -359,7 +364,7 @@ def main() -> int:
         cid, street, house = u["chat_id"], u["street"], u["house"]
         resp = site["houses"].get(street) or {}
         if resp.get("error"):
-            log(f"{cid}: помилка запиту вулиці: {resp['error']}")
+            log(f"{anon(cid)}: помилка запиту вулиці")
             continue
         houses = resp.get("data") or {}
         guard = ("chat_id = ? AND state = ? AND street = ? AND house = ?", cid, u["state"], street, house)
@@ -397,13 +402,13 @@ def main() -> int:
             if grp:
                 tg_send(cid, text)
             sent += 1
-            log(f"{cid}: адресу підтверджено ({group_name(grp) or 'без групи'})")
+            log(f"{anon(cid)}: адресу підтверджено ({group_name(grp) or 'без групи'})")
             continue
 
         # ---------- активний: пошук змін
         key = find_house(houses, house)
         if key is None:
-            log(f"{cid}: будинок {house} зник зі списку — пропускаю")
+            log(f"{anon(cid)}: будинок зник зі списку ДТЕК — пропускаю")
             continue
         groups = houses[key].get("sub_type_reason") or []
         grp = groups[0] if groups else ""
@@ -432,7 +437,7 @@ def main() -> int:
                               + blocks + [footer_html(update)])
             if tg_send(cid, msg) == "blocked":
                 db.q(f"UPDATE users SET state = 'stopped' WHERE {guard[0]}", *guard[1:])
-                log(f"{cid}: заблокував бота — відписано")
+                log(f"{anon(cid)}: заблокував бота — відписано")
                 continue
             sent += 1
         keep = {d: v for d, v in {**old_days, **days}.items() if d >= today_tomorrow()[0][0]}
