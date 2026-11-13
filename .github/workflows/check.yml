@@ -4,6 +4,18 @@ name: Перевірка графіка
 # а також ботом одразу після введення нової адреси.
 on:
   workflow_dispatch:
+    inputs:
+      reason:
+        description: "Причина запуску"
+        required: false
+        default: manual
+        type: string
+
+run-name: >-
+  ${{ inputs.reason == 'cron' && '⏰ За розкладом'
+   || inputs.reason == 'address' && '📍 Нова адреса'
+   || inputs.reason == 'deploy' && '🚀 Після розгортання'
+   || '▶️ Вручну' }}
 
 concurrency:
   group: check

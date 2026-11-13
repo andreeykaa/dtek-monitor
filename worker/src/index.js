@@ -108,7 +108,7 @@ async function loadStreets(env) {
 }
 
 // Запустити позачергову перевірку на GitHub (щоб не чекати до 10 хв)
-async function triggerCheck(env) {
+async function triggerCheck(env, reason) {
   if (!env.GH_TOKEN || !env.GH_REPO) return false;
   const r = await fetch(
     `https://api.github.com/repos/${env.GH_REPO}/actions/workflows/check.yml/dispatches`,
@@ -120,7 +120,7 @@ async function triggerCheck(env) {
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "dtek-monitor-bot",
       },
-      body: JSON.stringify({ ref: "main" }),
+      body: JSON.stringify({ ref: "main", inputs: { reason } }),
     }
   );
   if (r.status !== 204) console.error("GitHub dispatch:", r.status, await r.text());
@@ -173,7 +173,7 @@ async function onHouseText(env, chatId, user, text) {
     return send(env, chatId, "Введіть, будь ласка, лише номер будинку (напр. <i>7</i> або <i>12а</i>).");
   }
   await setUser(env, chatId, { state: "pending", house });
-  const fast = await triggerCheck(env);
+  const fast = await triggerCheck(env, "address");
   await send(
     env,
     chatId,
@@ -273,7 +273,7 @@ async function onCallback(env, cb) {
 // Cloudflare Cron (wrangler.toml) кожні 15 хв запускає перевірку на GitHub.
 // Розклад GitHub Actions ненадійний, тож запускаємо самі.
 async function onSchedule(env) {
-  const ok = await triggerCheck(env);
+  const ok = await triggerCheck(env, "cron");
   const alerted = await env.DB.prepare("SELECT value FROM meta WHERE key = 'dispatch_alert'").first();
   if (ok && alerted) {
     await env.DB.prepare("DELETE FROM meta WHERE key = 'dispatch_alert'").run();

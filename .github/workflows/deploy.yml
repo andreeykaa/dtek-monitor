@@ -107,6 +107,6 @@ jobs:
           echo "Telegram підключено ✅"
 
       - name: Перша перевірка
-        run: gh workflow run check.yml -R "$GITHUB_REPOSITORY" || true
+        run: gh workflow run check.yml -R "$GITHUB_REPOSITORY" -f reason=deploy || true
         env:
           GH_TOKEN: ${{ github.token }}
