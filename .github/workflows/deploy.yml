@@ -99,6 +99,7 @@ jobs:
             {"command":"status","description":"Поточний графік"},
             {"command":"address","description":"Змінити адресу"},
             {"command":"stop","description":"Відписатися від сповіщень"},
+            {"command":"delete","description":"Видалити мої дані"},
             {"command":"start","description":"Почати / підписатися знову"}]}' >/dev/null
           curl -fsS --retry 4 --retry-all-errors --retry-delay 3 "$TG/setMyShortDescription" -H "Content-Type: application/json" \
             -d '{"short_description":"Сповіщення про зміни графіка відключень ДТЕК Київські електромережі за вашою адресою"}' >/dev/null

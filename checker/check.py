@@ -31,6 +31,7 @@ KYIV = ZoneInfo("Europe/Kyiv")
 CF_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "")
 CF_ACCOUNT = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+HC_URL = os.environ.get("HEALTHCHECK_URL", "").strip()
 
 MAIN_KEYBOARD = {
     "keyboard": [[{"text": "📅 Графік"}, {"text": "📍 Змінити адресу"}]],
@@ -561,5 +562,23 @@ def main() -> int:
     return 0
 
 
+def hc_ping(suffix="", body=""):
+    """«Сторож» healthchecks.io: відмітка після кожної перевірки (або /fail з причиною)."""
+    if not HC_URL:
+        return
+    try:
+        req = urllib.request.Request(HC_URL.rstrip("/") + suffix, data=body.encode()[:5000] or None,
+                                     method="POST")
+        urllib.request.urlopen(req, timeout=10).close()
+    except Exception as e:
+        log(f"Сторож не відповів: {type(e).__name__}")
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        code = main()
+    except Exception as e:
+        hc_ping("/fail", f"{type(e).__name__}: {e}")
+        raise
+    hc_ping("" if code == 0 else "/fail")
+    sys.exit(code)

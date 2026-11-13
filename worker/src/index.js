@@ -28,7 +28,8 @@ const HELP =
   "Що я вмію:\n" +
   `• <b>${BTN_SCHEDULE}</b> або /status — поточний графік\n` +
   `• <b>${BTN_ADDRESS}</b> або /address — вказати іншу адресу\n` +
-  "• /stop — відписатися від сповіщень";
+  "• /stop — відписатися від сповіщень\n" +
+  "• /delete — видалити всі ваші дані";
 
 // ---------------------------------------------------------------- utils
 
@@ -124,7 +125,41 @@ async function triggerCheck(env, reason) {
     }
   );
   if (r.status !== 204) console.error("GitHub dispatch:", r.status, await r.text());
+  await checkTokenExpiry(env, r.headers.get("github-authentication-token-expiration"));
   return r.status === 204;
+}
+
+// GitHub повідомляє дату закінчення токена: "2026-12-13 16:15:00 +0200" або "... UTC"
+export function parseGhDate(s) {
+  const m = String(s || "").match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s*(UTC|[+-]\d{2}:?\d{2})?/);
+  if (!m) return null;
+  const tz = !m[3] || m[3] === "UTC" ? "Z" : m[3].replace(/^([+-]\d{2}):?(\d{2})$/, "$1:$2");
+  const d = new Date(`${m[1]}T${m[2]}${tz}`);
+  return isNaN(d) ? null : d;
+}
+
+// Попередити адміна за 7 днів до закінчення GH_DISPATCH_TOKEN (раз на добу)
+async function checkTokenExpiry(env, header) {
+  const exp = parseGhDate(header);
+  if (!exp || !env.ADMIN_CHAT_ID) return;
+  const days = Math.floor((exp - Date.now()) / 86400000);
+  if (days > 7) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const last = await env.DB.prepare("SELECT value FROM meta WHERE key = 'token_expiry_alert'").first();
+  if (last?.value === today) return;
+  await env.DB.prepare(
+    "INSERT INTO meta (key, value) VALUES ('token_expiry_alert', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+  )
+    .bind(today)
+    .run();
+  const [y, mo, d] = exp.toISOString().slice(0, 10).split("-");
+  await send(
+    env,
+    env.ADMIN_CHAT_ID,
+    `⏳ <b>ДТЕК Монітор:</b> токен <code>GH_DISPATCH_TOKEN</code> закінчується <b>${d}.${mo}.${y}</b>` +
+      (days > 0 ? ` (через ${days} дн.)` : " (сьогодні)") +
+      ".\n\nСтворіть новий токен (Actions: Read and write), оновіть секрет у GitHub і запустіть «Розгортання бота»."
+  );
 }
 
 // ---------------------------------------------------------------- dialog
@@ -222,9 +257,28 @@ async function onMessage(env, msg) {
   if (cmd === "/status" || text === BTN_SCHEDULE) return showStatus(env, chatId, user);
   if (cmd === "/stop") {
     if (user) await setUser(env, chatId, { state: "stopped" });
-    return send(env, chatId, "🔕 Ви відписались від сповіщень.\n/start — підписатися знову.", {
-      reply_markup: { remove_keyboard: true },
-    });
+    return send(
+      env,
+      chatId,
+      "🔕 Ви відписались від сповіщень.\n/start — підписатися знову.\n/delete — повністю видалити ваші дані.",
+      { reply_markup: { remove_keyboard: true } }
+    );
+  }
+  if (cmd === "/delete") {
+    if (!user) return send(env, chatId, "Про вас нічого не збережено.");
+    return send(
+      env,
+      chatId,
+      "Видалити всі ваші дані — адресу, групу і збережений графік?\nСповіщення припиняться.",
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🗑 Так, видалити", callback_data: "del:yes" }],
+            [{ text: "Скасувати", callback_data: "del:no" }],
+          ],
+        },
+      }
+    );
   }
   if (cmd === "/help") return send(env, chatId, HELP);
 
@@ -249,7 +303,26 @@ async function onCallback(env, cb) {
   const chatId = cb.message?.chat?.id;
   const data = cb.data || "";
   await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
-  if (!chatId || !data.startsWith("st:")) return;
+  if (!chatId) return;
+  const clearButtons = () =>
+    tg(env, "editMessageReplyMarkup", {
+      chat_id: chatId,
+      message_id: cb.message.message_id,
+      reply_markup: { inline_keyboard: [] },
+    });
+
+  if (data === "del:yes") {
+    await env.DB.prepare("DELETE FROM users WHERE chat_id = ?").bind(chatId).run();
+    await clearButtons();
+    return send(env, chatId, "🗑 Ваші дані видалено.\nЯкщо захочете повернутися — /start.", {
+      reply_markup: { remove_keyboard: true },
+    });
+  }
+  if (data === "del:no") {
+    await clearButtons();
+    return send(env, chatId, "Гаразд, нічого не видалено.");
+  }
+  if (!data.startsWith("st:")) return;
 
   const user = await getUser(env, chatId);
   if (!user || user.state !== "awaiting_street") {
@@ -260,11 +333,7 @@ async function onCallback(env, cb) {
     .first();
   if (!row) return send(env, chatId, "Список вулиць оновився — введіть назву ще раз.");
 
-  await tg(env, "editMessageReplyMarkup", {
-    chat_id: chatId,
-    message_id: cb.message.message_id,
-    reply_markup: { inline_keyboard: [] },
-  });
+  await clearButtons();
   return chooseStreet(env, chatId, row.name);
 }
 

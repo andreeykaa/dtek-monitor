@@ -33,7 +33,9 @@ Telegram-бот, який стежить за графіком відключе�
 | `CLOUDFLARE_ACCOUNT_ID` | Account ID з Cloudflare |
 | `CLOUDFLARE_API_TOKEN` | API-токен Cloudflare: шаблон «Edit Cloudflare Workers» + дозвіл **Account → D1 → Edit** |
 | `GH_DISPATCH_TOKEN` | **обов'язково** — через нього запускаються всі перевірки, див. нижче |
-| `ADMIN_CHAT_ID` | *(бажано)* ваш Telegram chat_id — бот попередить, якщо перевірки перестануть запускатися |
+| `ADMIN_CHAT_ID` | *(бажано)* ваш Telegram chat_id — бот попередить, якщо перевірки перестануть запускатися
+  або за 7 днів до закінчення `GH_DISPATCH_TOKEN` |
+| `HEALTHCHECK_URL` | *(бажано)* адреса «сторожа» healthchecks.io — див. нижче |
 
 **`GH_DISPATCH_TOKEN`** дозволяє Cloudflare запускати перевірки на GitHub. Як створити:
 GitHub → аватар → **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**:
@@ -42,6 +44,14 @@ GitHub → аватар → **Settings → Developer settings → Personal acces
 - *Expiration*: краще 1 рік або без терміну — коли токен закінчиться, перевірки зупиняться
   (з `ADMIN_CHAT_ID` бот про це напише);
 - Generate → скопіювати.
+
+**`HEALTHCHECK_URL`** — «сторож»: після кожної вдалої перевірки бот відмічається на
+[healthchecks.io](https://healthchecks.io); якщо відмітки довго немає — сервіс сам повідомить вас.
+Це ловить будь-який збій: Cloudflare, GitHub, токен, сайт ДТЕК.
+1. Зареєструватися на healthchecks.io (безкоштовно) → **Add Check**.
+2. *Schedule*: **Period 10 minutes**, **Grace 20 minutes**.
+3. *Integrations* → додати **Telegram** (або залишити Email).
+4. Скопіювати *Ping URL* (`https://hc-ping.com/...`) у секрет `HEALTHCHECK_URL`.
 
 ### 2. Розгортання
 
@@ -63,6 +73,7 @@ GitHub → аватар → **Settings → Developer settings → Personal acces
 - **📅 Графік** / `/status` — поточний графік
 - **📍 Змінити адресу** / `/address`
 - `/stop` — відписатися, `/start` — підписатися знову
+- `/delete` — повністю видалити свої дані
 
 ## Корисне знати
 
