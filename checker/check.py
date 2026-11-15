@@ -100,8 +100,13 @@ def tg_send(chat_id, text, keyboard=True) -> str:
     }
     if keyboard:
         payload["reply_markup"] = MAIN_KEYBOARD
-    for _ in range(3):
-        res = http_json(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", payload)
+    for attempt in range(4):
+        try:
+            res = http_json(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", payload)
+        except Exception as e:  # обрив з'єднання, таймаут тощо — повторюємо
+            log(f"Telegram {anon(chat_id)}: мережева помилка ({type(e).__name__}), спроба {attempt + 1}")
+            time.sleep(2 * (attempt + 1))
+            continue
         if res.get("ok"):
             return "ok"
         code = res.get("error_code")
@@ -552,6 +557,10 @@ def main() -> int:
     # ---------- розсилка (паралельно) і одне пакетне оновлення бази
     results = send_all(outbox)
     for cid, st in results.items():
+        if st == "error" and cid in updates:
+            # не доставили — не запам'ятовуємо зміни, щоб наступна перевірка надіслала ще раз
+            updates.pop(cid)
+            log(f"{anon(cid)}: не доставлено — повторю наступного разу")
         if st == "blocked":
             u = next(x for x in users if x["chat_id"] == cid)
             updates.setdefault(cid, {"chat_id": cid, "old_state": u["state"], "street": u["street"],
