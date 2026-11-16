@@ -21,7 +21,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 
 URL = "https://www.dtek-kem.com.ua/ua/shutdowns"
@@ -33,11 +33,23 @@ CF_ACCOUNT = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 HC_URL = os.environ.get("HEALTHCHECK_URL", "").strip()
 
-MAIN_KEYBOARD = {
-    "keyboard": [[{"text": "📅 Графік"}, {"text": "📍 Змінити адресу"}]],
-    "resize_keyboard": True,
-    "is_persistent": True,
-}
+BTN_WARN_ON = "⏰ Попереджати про світло"
+BTN_WARN_OFF = "🔕 Не попереджати про світло"
+
+
+def main_keyboard(warn_on: bool) -> dict:
+    """Меню під полем вводу; кнопка попереджень показує дію, а не стан."""
+    return {
+        "keyboard": [[{"text": "📅 Графік"}, {"text": "📍 Змінити адресу"}],
+                     [{"text": BTN_WARN_OFF if warn_on else BTN_WARN_ON}]],
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+
+
+OFFER_TEXT = "💡 Можу попереджати за 30 хв до вимкнення й увімкнення світла за графіком."
+OFFER_KEYBOARD = {"inline_keyboard": [[{"text": BTN_WARN_ON, "callback_data": "warn:on"}],
+                                      [{"text": "Ні, дякую", "callback_data": "warn:no"}]]}
 
 # Значення комірки години -> дві півгодини: "+" світло є, "-" немає, "?" можливо немає
 HALF = {
@@ -92,14 +104,16 @@ class D1:
         return res["result"][0].get("results", [])
 
 
-def tg_send(chat_id, text, keyboard=True) -> str:
-    """-> 'ok' | 'blocked' | 'error'"""
+def tg_send(chat_id, text, keyboard=None, silent=False) -> str:
+    """keyboard: dict (reply_markup) або None. -> 'ok' | 'blocked' | 'error'"""
     payload = {
         "chat_id": chat_id, "text": text, "parse_mode": "HTML",
         "link_preview_options": {"is_disabled": True},
     }
-    if keyboard:
-        payload["reply_markup"] = MAIN_KEYBOARD
+    if isinstance(keyboard, dict):
+        payload["reply_markup"] = keyboard
+    if silent:
+        payload["disable_notification"] = True
     for attempt in range(4):
         try:
             res = http_json(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", payload)
@@ -368,16 +382,16 @@ LIMITER = RateLimiter(SEND_RATE)
 
 
 def send_user(cid, msgs):
-    for text, keyboard in msgs:
+    for text, keyboard, *rest in msgs:
         LIMITER.wait()
-        st = tg_send(cid, text, keyboard)
+        st = tg_send(cid, text, keyboard, silent=bool(rest and rest[0]))
         if st != "ok":
             return st
     return "ok"
 
 
 def send_all(outbox: dict) -> dict:
-    """outbox: {chat_id: [(text, keyboard), ...]} -> {chat_id: 'ok'|'blocked'|'error'}"""
+    """outbox: {chat_id: [(text, keyboard[, silent]), ...]} -> {chat_id: 'ok'|'blocked'|'error'}"""
     if not outbox:
         return {}
     with ThreadPoolExecutor(SEND_THREADS) as ex:
@@ -390,6 +404,8 @@ UPDATE_SQL = """
 UPDATE users SET
   state = j.value->>'state', house = j.value->>'house', grp = j.value->>'grp',
   last_days = j.value->>'last_days', last_text = j.value->>'last_text',
+  warn = COALESCE(users.warn, j.value->>'warn'),   -- бот міг змінити налаштування під час перевірки
+  warned = j.value->>'warned',
   updated_at = CURRENT_TIMESTAMP
 FROM json_each(?) AS j
 WHERE users.chat_id = j.value->>'chat_id'
@@ -425,6 +441,65 @@ def sync_streets(db, streets):
     log(f"Оновлено список вулиць: {len(streets)}")
 
 
+# ============================================================ попередження за 30 хв
+
+WARN_MIN, WARN_MAX = 5, 31   # надсилаємо, якщо до перемикання від 5 до ~30 хв
+QUIET_UNTIL = 7              # з 00:00 до 07:00 — беззвучно
+
+
+def dur_label(n_halves):
+    return "30 хв" if n_halves == 1 else dur(n_halves)
+
+
+def upcoming_switches(days, now):
+    """Перемикання «світло ↔ немає» в найближчі WARN_MIN..WARN_MAX хв.
+    -> [(час, новий_стан '+'/'-', індекс_кінця_періоду, всього_слотів, хвилин_до)]"""
+    today = now.date()
+    d0, d1 = today.isoformat(), (today + timedelta(days=1)).isoformat()
+    if d0 not in days:
+        return []
+    h = halves_of(days[d0]) + (halves_of(days[d1]) if d1 in days else "")
+    t0 = datetime.combine(today, dtime(0), tzinfo=KYIV)
+    out = []
+    for k in range(1, len(h)):
+        a, b = h[k - 1], h[k]
+        if a == b or a not in "+-" or b not in "+-":
+            continue  # без зміни або «можливе» відключення
+        t = t0 + timedelta(minutes=30 * k)
+        mins = (t - now).total_seconds() / 60
+        if not (WARN_MIN < mins <= WARN_MAX):
+            continue
+        j = k
+        while j < len(h) and h[j] == b:
+            j += 1
+        out.append((t, b, j, len(h), mins))
+    return out
+
+
+def warn_html(t, state, end_idx, total, k, mins, changed):
+    t0 = datetime.combine(t.date() if k < 48 else t.date() - timedelta(days=1), dtime(0), tzinfo=KYIV)
+    today = t0.date()
+    label = f"{t:%H:%M}" + (" (завтра)" if t.date() > today else "")
+    title = (f"🔴 <b>{label} — вимкнення світла за графіком</b>" if state == "-"
+             else f"🟢 <b>{label} — увімкнення світла за графіком</b>")
+    left = max(5, 5 * round(mins / 5))
+    parts = [f"Залишилось {left} хв"]
+    if changed and left < 30:
+        parts.append("графік щойно змінився")
+    what = "світла не буде" if state == "-" else "світло буде"
+    if end_idx >= total:  # до кінця відомого графіка
+        horizon_day = today + timedelta(days=total // 48 - 1)
+        parts.append(f"{what} до кінця " + ("завтрашньої доби" if horizon_day > t.date() else "доби"))
+    else:
+        end = t0 + timedelta(minutes=30 * end_idx)
+        if end == datetime.combine(t.date() + timedelta(days=1), dtime(0), tzinfo=KYIV):
+            end_label = "24:00"
+        else:
+            end_label = f"{end:%H:%M}" + (" завтра" if end.date() > t.date() else "")
+        parts.append(f"{what} до {end_label} ({dur_label(end_idx - k)})")
+    return f"{title}\n" + " · ".join(parts)
+
+
 # ============================================================ основне
 
 def main() -> int:
@@ -436,7 +511,7 @@ def main() -> int:
 
     started = time.monotonic()
     db = D1()
-    users = db.q("SELECT chat_id, state, street, house, grp, last_days, last_text FROM users "
+    users = db.q("SELECT chat_id, state, street, house, grp, last_days, last_text, warn, warned FROM users "
                  "WHERE state IN ('active', 'pending') AND street IS NOT NULL AND house IS NOT NULL")
     pending = [u for u in users if u["state"] == "pending"]
 
@@ -472,11 +547,17 @@ def main() -> int:
     outbox, updates = {}, {}
 
     def upd(u, **new):
-        row = {"chat_id": u["chat_id"], "old_state": u["state"], "street": u["street"], "old_house": u["house"],
-               "state": u["state"], "house": u["house"], "grp": u["grp"],
-               "last_days": u["last_days"], "last_text": u["last_text"]}
+        row = updates.get(u["chat_id"]) or {
+            "chat_id": u["chat_id"], "old_state": u["state"], "street": u["street"], "old_house": u["house"],
+            "state": u["state"], "house": u["house"], "grp": u["grp"],
+            "last_days": u["last_days"], "last_text": u["last_text"],
+            "warn": u["warn"], "warned": u["warned"]}
         row.update(new)
         updates[u["chat_id"]] = row
+
+    kbs = {u["chat_id"]: main_keyboard(u["warn"] == 1) for u in users}
+    quiet = now.hour < QUIET_UNTIL
+    warned_n = 0
 
     for u in users:
         cid, street, house = u["chat_id"], u["street"], u["house"]
@@ -490,14 +571,14 @@ def main() -> int:
             if not houses:
                 upd(u, state="awaiting_street")
                 outbox[cid] = [(f"😕 Не вдалося знайти вулицю «{html.escape(street)}» на сайті ДТЕК.\n\n"
-                                "Введіть назву вулиці ще раз.", False)]
+                                "Введіть назву вулиці ще раз.", None)]
                 continue
             key = find_house(houses, house)
             if key is None:
                 upd(u, state="awaiting_house")
                 sim = ", ".join(similar_houses(houses, house))
                 outbox[cid] = [(f"😕 Будинок <b>{html.escape(house)}</b> не знайдено на {html.escape(street)}.\n\n"
-                                f"Є, наприклад: {html.escape(sim)}\n\nВведіть номер будинку ще раз.", False)]
+                                f"Є, наприклад: {html.escape(sim)}\n\nВведіть номер будинку ще раз.", None)]
                 continue
             groups = houses[key].get("sub_type_reason") or []
             grp = groups[0] if groups else ""
@@ -507,13 +588,16 @@ def main() -> int:
                 intro = (f"✅ <b>Адресу підтверджено!</b>\n📍 {html.escape(street)}, {html.escape(key)} · "
                          f"група {html.escape(group_name(grp))}\n\n"
                          "🔔 Я напишу, коли графік на сьогодні зміниться або з'явиться графік на завтра.")
-                outbox[cid] = [(intro, True), (text, True)]
+                outbox[cid] = [(intro, kbs[cid]), (text, kbs[cid])]
+                if u["warn"] is None:  # перша реєстрація — один раз пропонуємо попередження
+                    outbox[cid].append((OFFER_TEXT, OFFER_KEYBOARD))
             else:
                 outbox[cid] = [(f"✅ Адресу знайдено: {html.escape(street)}, {html.escape(key)}\n\n"
                                 "⚠️ Але ДТЕК не вказує для цього будинку групу відключень, "
-                                "тому графік відстежити не вийде.", True)]
+                                "тому графік відстежити не вийде.", kbs[cid])]
             upd(u, state="active", house=key, grp=grp, last_days=json.dumps(days),
-                last_text=text if grp else None)
+                last_text=text if grp else None,
+                warn=(0 if u["warn"] is None and grp else u["warn"]))
             log(f"{anon(cid)}: адресу підтверджено ({group_name(grp) or 'без групи'})")
             continue
 
@@ -549,17 +633,32 @@ def main() -> int:
         text = status_text({**u, "grp": grp}, days, update)
         if blocks:
             outbox[cid] = [("\n\n".join([header_html(" · ".join(titles), street, house, grp)]
-                                        + blocks + [footer_html(update)]), True)]
+                                        + blocks + [footer_html(update)]), kbs[cid])]
         keep = {d: v for d, v in {**old_days, **days}.items() if d >= today_tomorrow()[0][0]}
         if keep != old_days or text != u["last_text"] or grp != u["grp"]:
             upd(u, grp=grp, last_days=json.dumps(keep), last_text=text)
+
+        # ---------- попередження за 30 хв до перемикання (якщо ввімкнено)
+        if u["warn"] == 1:
+            last = u["warned"] or ""
+            for t, state, end_idx, total, mins in upcoming_switches(days, now):
+                key = t.strftime("%Y-%m-%dT%H:%M")
+                if key <= last:
+                    continue  # уже попереджали
+                k = round((t - datetime.combine(now.date(), dtime(0), tzinfo=KYIV)).total_seconds() / 1800)
+                outbox.setdefault(cid, []).append(
+                    (warn_html(t, state, end_idx, total, k, mins, changed=bool(blocks)), kbs[cid], quiet))
+                last = key
+                warned_n += 1
+            if last != (u["warned"] or ""):
+                upd(u, warned=last)
 
     # ---------- повідомлення адміна всім активним (/broadcast)
     bc_rows = db.q("SELECT value FROM meta WHERE key = 'broadcast'")
     broadcast = json.loads(bc_rows[0]["value"]) if bc_rows else None
     bc_ids = [u["chat_id"] for u in users if u["state"] == "active"] if broadcast else []
     for cid in bc_ids:
-        outbox.setdefault(cid, []).append((broadcast["html"], True))
+        outbox.setdefault(cid, []).append((broadcast["html"], kbs[cid]))
 
     # ---------- розсилка (паралельно) і одне пакетне оновлення бази
     results = send_all(outbox)
@@ -568,7 +667,7 @@ def main() -> int:
         ok_n = sum(results.get(c) == "ok" for c in bc_ids)
         fail_n = len(bc_ids) - ok_n
         tg_send(broadcast["admin"], f"✅ Розсилку надіслано: {ok_n} з {len(bc_ids)}"
-                + (f" (не доставлено: {fail_n})" if fail_n else ""), keyboard=False)
+                + (f" (не доставлено: {fail_n})" if fail_n else ""))
         log(f"Розсилка адміна: {ok_n}/{len(bc_ids)}")
     for cid, st in results.items():
         if st == "error" and cid in updates:
@@ -577,10 +676,7 @@ def main() -> int:
             log(f"{anon(cid)}: не доставлено — повторю наступного разу")
         if st == "blocked":
             u = next(x for x in users if x["chat_id"] == cid)
-            updates.setdefault(cid, {"chat_id": cid, "old_state": u["state"], "street": u["street"],
-                                     "old_house": u["house"], "house": u["house"], "grp": u["grp"],
-                                     "last_days": u["last_days"], "last_text": u["last_text"]})
-            updates[cid]["state"] = "stopped"
+            upd(u, state="stopped")
             log(f"{anon(cid)}: заблокував бота — відписано")
     apply_updates(db, list(updates.values()))
 
@@ -590,8 +686,8 @@ def main() -> int:
              now.isoformat(timespec="seconds"), json.dumps(sorted(houses_by_street), ensure_ascii=False))
 
     ok = sum(st == "ok" for st in results.values())
-    log(f"Готово за {time.monotonic() - started:.0f} с. Надіслано: {ok} користувачам, "
-        f"оновлено записів: {len(updates)}. Оновлено ДТЕК: {update}")
+    log(f"Готово за {time.monotonic() - started:.0f} с. Надіслано: {ok} користувачам "
+        f"(попереджень: {warned_n}), оновлено записів: {len(updates)}. Оновлено ДТЕК: {update}")
     return 0
 
 

@@ -4,11 +4,24 @@
 
 const BTN_SCHEDULE = "📅 Графік";
 const BTN_ADDRESS = "📍 Змінити адресу";
-const MAIN_KEYBOARD = {
-  keyboard: [[{ text: BTN_SCHEDULE }, { text: BTN_ADDRESS }]],
+const BTN_WARN_ON = "⏰ Попереджати про світло";
+const BTN_WARN_OFF = "🔕 Не попереджати про світло";
+
+// Меню під полем вводу. Кнопка попереджень показує дію, а не стан.
+const mainKeyboard = (warnOn) => ({
+  keyboard: [[{ text: BTN_SCHEDULE }, { text: BTN_ADDRESS }], [{ text: warnOn ? BTN_WARN_OFF : BTN_WARN_ON }]],
   resize_keyboard: true,
   is_persistent: true,
-};
+});
+const kbFor = (user) => mainKeyboard(user?.warn === 1);
+
+const WARN_ON_TEXT =
+  "⏰ <b>Попередження про світло увімкнено</b>\n" +
+  "За 30 хв до того, як за графіком ДТЕК мають вимкнути або дати світло, я напишу вам.\n" +
+  "Насправді світло можуть вимкнути чи дати раніше або пізніше — я цього не бачу, лише графік.";
+const WARN_OFF_TEXT =
+  "🔕 <b>Попередження про світло вимкнено</b>\n" +
+  "Повідомлення про зміни графіка приходитимуть, як і раніше.";
 const MAX_MATCHES = 8;
 
 const WELCOME =
@@ -29,6 +42,7 @@ const HELP =
   "Що я вмію:\n" +
   `• <b>${BTN_SCHEDULE}</b> або /status — поточний графік\n` +
   `• <b>${BTN_ADDRESS}</b> або /address — вказати іншу адресу\n` +
+  `• <b>${BTN_WARN_ON}</b> — попередження за 30 хв до вимкнення й увімкнення світла\n` +
   "• /stop — відписатися від сповіщень\n" +
   "• /delete — видалити всі ваші дані";
 
@@ -277,10 +291,10 @@ async function showStatus(env, chatId, user) {
   }
   if (!user.last_text) {
     return send(env, chatId, "Графік ще не отримано — спробуйте за кілька хвилин.", {
-      reply_markup: MAIN_KEYBOARD,
+      reply_markup: kbFor(user),
     });
   }
-  return send(env, chatId, user.last_text, { reply_markup: MAIN_KEYBOARD });
+  return send(env, chatId, user.last_text, { reply_markup: kbFor(user) });
 }
 
 // ---------------------------------------------------------------- розсилка (лише адмін)
@@ -319,6 +333,22 @@ async function onBroadcast(env, chatId, text) {
   });
 }
 
+// ---------------------------------------------------------------- попередження за 30 хв
+
+async function setWarn(env, chatId, user, on) {
+  if (!user || user.state !== "active") return send(env, chatId, "Спершу вкажіть адресу — /address");
+  if ((user.warn === 1) === on) {
+    return send(
+      env,
+      chatId,
+      on ? "⏰ Попередження про світло вже увімкнено." : "🔕 Попередження про світло вже вимкнено.",
+      { reply_markup: mainKeyboard(on) }
+    );
+  }
+  await setUser(env, chatId, { warn: on ? 1 : 0 });
+  return send(env, chatId, on ? WARN_ON_TEXT : WARN_OFF_TEXT, { reply_markup: mainKeyboard(on) });
+}
+
 async function onMessage(env, msg) {
   if (msg.chat?.type !== "private" || typeof msg.text !== "string") return;
   const chatId = msg.chat.id;
@@ -333,13 +363,14 @@ async function onMessage(env, msg) {
         env,
         chatId,
         `${user.state === "stopped" ? "🔔 Підписку відновлено!" : "Ви вже підписані."}\n📍 ${esc(user.street)}, ${esc(user.house)}\n\n${HELP}`,
-        { reply_markup: MAIN_KEYBOARD }
+        { reply_markup: kbFor(user) }
       );
     }
     return askStreet(env, chatId, WELCOME);
   }
   if (cmd === "/address" || text === BTN_ADDRESS) return askStreet(env, chatId);
   if (cmd === "/status" || text === BTN_SCHEDULE) return showStatus(env, chatId, user);
+  if (text === BTN_WARN_ON || text === BTN_WARN_OFF) return setWarn(env, chatId, user, text === BTN_WARN_ON);
   if (cmd === "/stop") {
     if (user) await setUser(env, chatId, { state: "stopped" });
     return send(
@@ -383,7 +414,7 @@ async function onMessage(env, msg) {
     case "stopped":
       return send(env, chatId, "Ви відписані від сповіщень. /start — підписатися знову.");
     default:
-      return send(env, chatId, HELP, { reply_markup: MAIN_KEYBOARD });
+      return send(env, chatId, HELP, { reply_markup: kbFor(user) });
   }
 }
 
@@ -416,6 +447,12 @@ async function onCallback(env, cb) {
       chatId,
       `⏳ Розсилку поставлено в чергу — піде ${fast ? "за 1–2 хвилини" : "з найближчою перевіркою (до 10 хв)"}. Надішлю звіт.`
     );
+  }
+
+  if (data === "warn:on" || data === "warn:no") {
+    await clearButtons();
+    if (data === "warn:no") return; // «Ні, дякую» — без відповіді
+    return setWarn(env, chatId, await getUser(env, chatId), true);
   }
 
   if (data === "del:yes") {
