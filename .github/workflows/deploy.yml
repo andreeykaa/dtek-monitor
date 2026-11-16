@@ -63,6 +63,19 @@ jobs:
           # імена користувачів не зберігаємо — стерти, якщо лишились
           curl -fsS --retry 4 --retry-all-errors --retry-delay 3 -X POST -H "$AUTH" -H "Content-Type: application/json" \
             -d '{"sql":"UPDATE users SET name = NULL WHERE name IS NOT NULL"}' "$API/$ID/query" | jq -e '.success' >/dev/null
+          # міграції: нові стовпці (помилка «вже існує» — нормально)
+          for SQL in "ALTER TABLE users ADD COLUMN warn INTEGER" "ALTER TABLE users ADD COLUMN warned TEXT"; do
+            curl -sS --retry 4 --retry-all-errors --retry-delay 3 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+              -d "$(jq -n --arg s "$SQL" '{sql:$s}')" "$API/$ID/query" >/dev/null || true
+          done
+          # один раз: тим, хто вже зареєстрований, пропозицію попереджень не показуємо (для них — анонс)
+          for SQL in \
+            "UPDATE users SET warn = 0 WHERE warn IS NULL AND (state IN ('active','stopped') OR grp IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM meta WHERE key = 'migr_warn_v1')" \
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('migr_warn_v1', datetime('now'))"; do
+            curl -fsS --retry 4 --retry-all-errors --retry-delay 3 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+              -d "$(jq -n --arg s "$SQL" '{sql:$s}')" "$API/$ID/query" | jq -e '.success' >/dev/null \
+              || { echo "::error::Помилка міграції"; exit 1; }
+          done
           echo "База готова: $ID"
 
       - name: Розгорнути Worker

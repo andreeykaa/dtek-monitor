@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS users (
   grp        TEXT,            -- група ГПВ, напр. GPV33.1
   last_days  TEXT,            -- JSON останнього графіка (для порівняння)
   last_text  TEXT,            -- готове повідомлення з графіком (для кнопки «Графік»)
+  warn       INTEGER,         -- попередження за 30 хв: NULL — ще не пропонували, 0 — вимк., 1 — увімк.
+  warned     TEXT,            -- час останнього перемикання, про яке вже попередили
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
