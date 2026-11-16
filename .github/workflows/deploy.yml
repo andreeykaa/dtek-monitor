@@ -3,7 +3,7 @@ name: Розгортання бота
 on:
   push:
     branches: [main]
-    paths: ["worker/**", ".github/workflows/deploy.yml"]
+    paths: ["worker/**", "tests/worker.test.mjs", ".github/workflows/deploy.yml"]
   workflow_dispatch:
 
 permissions:
@@ -25,11 +25,15 @@ jobs:
       ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
       WRANGLER: npx --yes wrangler@4
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
+
+      - name: Тести бота
+        working-directory: .
+        run: node --test tests/worker.test.mjs
 
       - name: Перевірка секретів
         run: |
@@ -112,6 +116,7 @@ jobs:
             {"command":"address","description":"Змінити адресу"},
             {"command":"stop","description":"Відписатися від сповіщень"},
             {"command":"delete","description":"Видалити мої дані"},
+            {"command":"feedback","description":"Написати відгук"},
             {"command":"start","description":"Почати / підписатися знову"}]'
           curl -fsS --retry 4 --retry-all-errors --retry-delay 3 "$TG/setMyCommands" -H "Content-Type: application/json" \
             -d "$(jq -n --argjson c "$CMDS" '{commands:$c}')" >/dev/null
@@ -119,7 +124,7 @@ jobs:
             # меню з /broadcast бачить лише адмін
             curl -fsS --retry 4 --retry-all-errors --retry-delay 3 "$TG/setMyCommands" -H "Content-Type: application/json" \
               -d "$(jq -n --argjson c "$CMDS" --arg id "$ADMIN_CHAT_ID" \
-                '{commands:($c + [{command:"broadcast",description:"Повідомлення всім (адмін)"}]), scope:{type:"chat",chat_id:($id|tonumber)}}')" >/dev/null
+                '{commands:($c + [{command:"broadcast",description:"Повідомлення всім (адмін)"},{command:"stats",description:"Статистика (адмін)"}]), scope:{type:"chat",chat_id:($id|tonumber)}}')" >/dev/null
           fi
           curl -fsS --retry 4 --retry-all-errors --retry-delay 3 "$TG/setMyShortDescription" -H "Content-Type: application/json" \
             -d '{"short_description":"Сповіщення про зміни графіка відключень ДТЕК Київські електромережі за вашою адресою"}' >/dev/null

@@ -44,7 +44,8 @@ const HELP =
   `• <b>${BTN_ADDRESS}</b> або /address — вказати іншу адресу\n` +
   `• <b>${BTN_WARN_ON}</b> — попередження за 30 хв до вимкнення й увімкнення світла\n` +
   "• /stop — відписатися від сповіщень\n" +
-  "• /delete — видалити всі ваші дані";
+  "• /delete — видалити всі ваші дані\n" +
+  "• /feedback — написати відгук або повідомити про проблему";
 
 // ---------------------------------------------------------------- utils
 
@@ -349,12 +350,101 @@ async function setWarn(env, chatId, user, on) {
   return send(env, chatId, on ? WARN_ON_TEXT : WARN_OFF_TEXT, { reply_markup: mainKeyboard(on) });
 }
 
+// ---------------------------------------------------------------- статистика (адмін)
+
+export const groupLabel = (g) => String(g || "").replace(/^GPV(\d+)\.\d+$/, "$1").replace(/^GPV/, "");
+
+async function onStats(env, chatId) {
+  const one = (sql) => env.DB.prepare(sql).first();
+  const { results } = await env.DB.prepare("SELECT state, count(*) AS n FROM users GROUP BY state").all();
+  const by = Object.fromEntries(results.map((r) => [r.state, r.n]));
+  const total = results.reduce((a, r) => a + r.n, 0);
+  const registering = (by.awaiting_street || 0) + (by.awaiting_house || 0) + (by.pending || 0);
+  const warnOn = (await one("SELECT count(*) AS n FROM users WHERE state = 'active' AND warn = 1")).n;
+  const new7 = (await one("SELECT count(*) AS n FROM users WHERE created_at >= datetime('now', '-7 days')")).n;
+  const streets = (await one("SELECT count(DISTINCT street) AS n FROM users WHERE state = 'active'")).n;
+  const groups = (
+    await env.DB.prepare(
+      "SELECT grp, count(*) AS n FROM users WHERE state = 'active' AND grp IS NOT NULL AND grp != '' " +
+        "GROUP BY grp ORDER BY n DESC LIMIT 5"
+    ).all()
+  ).results;
+  const lines = [
+    "📊 <b>Статистика</b>",
+    `👥 Усього: ${total}`,
+    `✅ Активні: ${by.active || 0} · ⏰ з попередженнями: ${warnOn}`,
+    `📝 Реєструються: ${registering}`,
+    `🔕 Відписані: ${by.stopped || 0}`,
+    `🆕 Нові за 7 днів: ${new7}`,
+    `📍 Різних вулиць: ${streets}`,
+  ];
+  if (groups.length) lines.push(`Групи: ${groups.map((g) => `${esc(groupLabel(g.grp))} — ${g.n}`).join(", ")}`);
+  return send(env, chatId, lines.join("\n"));
+}
+
+// ---------------------------------------------------------------- відгуки
+
+const FEEDBACK_MAX = 2000;
+
+async function getMeta(env, key) {
+  return (await env.DB.prepare("SELECT value FROM meta WHERE key = ?").bind(key).first())?.value ?? null;
+}
+
+async function sendFeedback(env, chatId, user, body) {
+  if (!env.ADMIN_CHAT_ID) return send(env, chatId, "Наразі відгуки недоступні.");
+  if (body.length > FEEDBACK_MAX) {
+    return send(env, chatId, `Задовге повідомлення: ${body.length} символів (максимум ${FEEDBACK_MAX}).`);
+  }
+  const last = Number(await getMeta(env, `fblast:${chatId}`)) || 0;
+  if (Date.now() - last < 30_000) return send(env, chatId, "Зачекайте трохи перед наступним повідомленням 🙏");
+  const addr = user?.street ? `📍 ${esc(user.street)}${user.house ? ", " + esc(user.house) : ""}` : "📍 адреса не вказана";
+  const grp = user?.grp ? ` · група ${esc(groupLabel(user.grp))}` : "";
+  const res = await send(
+    env,
+    env.ADMIN_CHAT_ID,
+    `💬 <b>Відгук</b>\n${addr}${grp}\n\n${esc(body)}\n\n<i>Щоб відповісти — зробіть Reply на це повідомлення.</i>`
+  );
+  if (!res?.ok) return send(env, chatId, "Не вдалося передати повідомлення, спробуйте пізніше.");
+  await setMeta(env, `fbmsg:${res.result.message_id}`, String(chatId));
+  await setMeta(env, `fblast:${chatId}`, String(Date.now()));
+  return send(env, chatId, "✅ Дякую! Ваше повідомлення передано.");
+}
+
+async function onAdminReply(env, msg) {
+  const target = await getMeta(env, `fbmsg:${msg.reply_to_message.message_id}`);
+  if (!target) return false; // це не відповідь на відгук
+  const res = await send(env, target, `💬 <b>Відповідь адміністратора</b>\n\n${esc(msg.text)}`);
+  await send(env, msg.chat.id, res?.ok ? "✅ Відповідь надіслано." : "⚠️ Не вдалося надіслати — можливо, користувач заблокував бота.");
+  return true;
+}
+
 async function onMessage(env, msg) {
   if (msg.chat?.type !== "private" || typeof msg.text !== "string") return;
   const chatId = msg.chat.id;
   const text = msg.text.trim();
   const cmd = text.startsWith("/") ? text.split(/[\s@]/)[0].toLowerCase() : null;
   const user = await getUser(env, chatId);
+
+  // відповідь адміна на переслане повідомлення-відгук
+  if (isAdmin(env, chatId) && msg.reply_to_message && !cmd) {
+    if (await onAdminReply(env, msg)) return;
+  }
+
+  // відгук: «/feedback текст» одразу, або «/feedback» → наступне повідомлення
+  const fbWaiting = await getMeta(env, `fbwait:${chatId}`);
+  if (fbWaiting) await setMeta(env, `fbwait:${chatId}`, null);
+  if (cmd === "/feedback") {
+    const body = text.replace(/^\/feedback(@\S+)?/i, "").trim();
+    if (body) return sendFeedback(env, chatId, user, body);
+    await setMeta(env, `fbwait:${chatId}`, "1");
+    return send(
+      env,
+      chatId,
+      "💬 Напишіть одним повідомленням, що подобається, що ні або що не працює — я передам адміністратору."
+    );
+  }
+  const isButton = [BTN_SCHEDULE, BTN_ADDRESS, BTN_WARN_ON, BTN_WARN_OFF].includes(text);
+  if (fbWaiting && !cmd && !isButton) return sendFeedback(env, chatId, user, text);
 
   if (cmd === "/start") {
     if (user?.street && user?.house && (user.state === "active" || user.state === "stopped")) {
@@ -397,9 +487,18 @@ async function onMessage(env, msg) {
     );
   }
   if (cmd === "/help") {
-    return send(env, chatId, HELP + (isAdmin(env, chatId) ? "\n\n<b>Адмін:</b>\n• /broadcast текст — повідомлення всім активним" : ""));
+    return send(
+      env,
+      chatId,
+      HELP +
+        (isAdmin(env, chatId)
+          ? "\n\n<b>Адмін:</b>\n• /broadcast текст — повідомлення всім активним\n• /stats — статистика\n" +
+            "• відповісти на відгук — Reply на повідомлення з відгуком"
+          : "")
+    );
   }
   if (cmd === "/broadcast" && isAdmin(env, chatId)) return onBroadcast(env, chatId, text);
+  if (cmd === "/stats" && isAdmin(env, chatId)) return onStats(env, chatId);
 
   if (!user) return askStreet(env, chatId, WELCOME);
   if (cmd) return send(env, chatId, HELP);

@@ -1,0 +1,32 @@
+name: Тести
+
+on:
+  push:
+    branches: [main]
+    paths: ["worker/**", "checker/**", "tests/**", ".github/workflows/tests.yml"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Тести бота (Cloudflare Worker)
+        run: node --test tests/worker.test.mjs
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Тести перевірки графіка
+        run: python -m unittest discover -s tests -v
