@@ -6,7 +6,7 @@ import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import worker, { norm, searchStreets, splitHouse, parseGhDate, groupLabel } from "../worker/src/index.js";
+import worker, { norm, searchStreets, splitHouse, parseGhDate, groupLabel, whenLight, fmtLeft, kyivNow } from "../worker/src/index.js";
 
 const SCHEMA = fs.readFileSync(new URL("../worker/schema.sql", import.meta.url), "utf8");
 const ADMIN = 42;
@@ -190,7 +190,7 @@ describe("команди користувача", () => {
     await msg(1, "/start");
     assert.equal(user(1).state, "active");
     assert.equal(user(1).warn, 1);
-    assert.equal(last().reply_markup.keyboard[1][0].text, "🔕 Не попереджати про світло");
+    assert.equal(last().reply_markup.keyboard.at(-1)[0].text, "🔕 Не попереджати про світло");
   });
   test("/delete з підтвердженням", async () => {
     addActive(1);
@@ -216,11 +216,11 @@ describe("попередження про світло", () => {
     await msg(1, "⏰ Попереджати про світло");
     assert.equal(user(1).warn, 1);
     assert.match(last().text, /Попередження про світло увімкнено/);
-    assert.equal(last().reply_markup.keyboard[1][0].text, "🔕 Не попереджати про світло");
+    assert.equal(last().reply_markup.keyboard.at(-1)[0].text, "🔕 Не попереджати про світло");
     await msg(1, "🔕 Не попереджати про світло");
     assert.equal(user(1).warn, 0);
     assert.match(last().text, /вимкнено/);
-    assert.equal(last().reply_markup.keyboard[1][0].text, "⏰ Попереджати про світло");
+    assert.equal(last().reply_markup.keyboard.at(-1)[0].text, "⏰ Попереджати про світло");
   });
   test("«Ні, дякую» лише прибирає кнопки", async () => {
     addActive(1);
@@ -344,5 +344,55 @@ describe("розклад", () => {
     await cron();
     await cron();
     assert.equal(sent.filter((m) => /GH_DISPATCH_TOKEN<\/code> закінчується/.test(m.text)).length, 1);
+  });
+});
+
+// ------------------------------------------------------------ «Коли світло?»
+
+describe("«Коли світло?»", () => {
+  const D = "2026-11-17", T = "2026-11-18";
+  const TODAY = [...Array(13).fill("yes"), ...Array(5).fill("no"), ...Array(4).fill("yes"), "no", "no"];
+  const at = (hh, mm) => new Date(`${D}T${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:00+02:00`);
+  const say = (days, t) => whenLight(JSON.stringify(days), t).replace(/<\/?[bi]>/g, "");
+
+  test("світло є — до котрої і що далі", () => {
+    assert.equal(say({ [D]: TODAY }, at(10, 45)),
+      "🟢 Зараз за графіком світло є\nДо 13:00 — ще 2 год 15 хв\nДалі: 🔴 без світла 13:00–18:00 (5 год)");
+  });
+  test("світла немає — коли дадуть", () => {
+    assert.equal(say({ [D]: TODAY }, at(14, 55)),
+      "🔴 Зараз за графіком світла немає\nДадуть о 18:00 — через 3 год 5 хв\nДалі: 🟢 світло 18:00–22:00 (4 год)");
+  });
+  test("до кінця доби, графіка на завтра немає", () => {
+    const t = say({ [D]: TODAY }, at(22, 30));
+    assert.match(t, /За графіком — до кінця доби/);
+    assert.match(t, /Графік на завтра ще не опубліковано/);
+  });
+  test("через північ", () => {
+    assert.match(say({ [D]: TODAY, [T]: ["no", "no", ...Array(22).fill("yes")] }, at(22, 30)),
+      /Дадуть завтра о 02:00 — через 3 год 30 хв/);
+    assert.match(say({ [D]: [...Array(23).fill("yes"), "no"], [T]: ["no", ...Array(23).fill("yes")] }, at(21, 0)),
+      /без світла 23:00–01:00 завтра \(2 год\)/);
+    assert.match(say({ [D]: [...Array(20).fill("no"), ...Array(4).fill("yes")], [T]: Array(24).fill("no") }, at(20, 30)),
+      /До 24:00 — ще 3 год 30 хв/);
+  });
+  test("без відключень і без графіка", () => {
+    assert.match(say({ [D]: Array(24).fill("yes") }, at(9, 0)), /Відключень за графіком до кінця доби немає/);
+    assert.equal(say({}, at(9, 0)), "Графіка на сьогодні поки немає.");
+  });
+  test("fmtLeft", () => {
+    assert.equal(fmtLeft(45), "45 хв");
+    assert.equal(fmtLeft(120), "2 год");
+    assert.equal(fmtLeft(135), "2 год 15 хв");
+  });
+  test("кнопка відповідає активному і просить адресу в інших", async () => {
+    db.prepare("INSERT INTO users (chat_id, state, street, house, grp, last_days) VALUES (1,'active','x','7','GPV33.1',?)")
+      .run(JSON.stringify({ [kyivNow().date]: Array(24).fill("yes") }));
+    await msg(1, "💡 Коли світло?");
+    assert.match(last().text, /Зараз за графіком/);
+    assert.equal(last().reply_markup.keyboard[0][0].text, "💡 Коли світло?");
+    db.prepare("INSERT INTO users (chat_id, state) VALUES (2, 'awaiting_street')").run();
+    await msg(2, "/light");
+    assert.match(last().text, /Спершу вкажіть адресу/);
   });
 });

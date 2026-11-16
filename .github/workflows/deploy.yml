@@ -112,7 +112,8 @@ jobs:
             --arg url "$WORKER_URL/telegram" --arg s "$WEBHOOK_SECRET" \
             '{url:$url, secret_token:$s, allowed_updates:["message","callback_query"]}')" | jq -e '.ok' >/dev/null \
             || { echo "::error::Telegram не прийняв webhook — перевірте TELEGRAM_BOT_TOKEN"; exit 1; }
-          CMDS='[{"command":"status","description":"Поточний графік"},
+          CMDS='[{"command":"light","description":"Коли світло?"},
+            {"command":"status","description":"Поточний графік"},
             {"command":"address","description":"Змінити адресу"},
             {"command":"stop","description":"Відписатися від сповіщень"},
             {"command":"delete","description":"Видалити мої дані"},

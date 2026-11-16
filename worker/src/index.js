@@ -8,8 +8,13 @@ const BTN_WARN_ON = "⏰ Попереджати про світло";
 const BTN_WARN_OFF = "🔕 Не попереджати про світло";
 
 // Меню під полем вводу. Кнопка попереджень показує дію, а не стан.
+const BTN_NOW = "💡 Коли світло?";
 const mainKeyboard = (warnOn) => ({
-  keyboard: [[{ text: BTN_SCHEDULE }, { text: BTN_ADDRESS }], [{ text: warnOn ? BTN_WARN_OFF : BTN_WARN_ON }]],
+  keyboard: [
+    [{ text: BTN_NOW }, { text: BTN_SCHEDULE }],
+    [{ text: BTN_ADDRESS }],
+    [{ text: warnOn ? BTN_WARN_OFF : BTN_WARN_ON }],
+  ],
   resize_keyboard: true,
   is_persistent: true,
 });
@@ -40,6 +45,7 @@ const ASK_STREET =
 
 const HELP =
   "Що я вмію:\n" +
+  `• <b>${BTN_NOW}</b> або /light — чи є зараз світло за графіком і до котрої\n` +
   `• <b>${BTN_SCHEDULE}</b> або /status — поточний графік\n` +
   `• <b>${BTN_ADDRESS}</b> або /address — вказати іншу адресу\n` +
   `• <b>${BTN_WARN_ON}</b> — попередження за 30 хв до вимкнення й увімкнення світла\n` +
@@ -280,6 +286,86 @@ async function submitHouse(env, chatId, street, house) {
   );
 }
 
+// ---------------------------------------------------------------- «Коли світло?»
+
+const HALF = { yes: "++", no: "--", first: "-+", second: "+-", maybe: "??", mfirst: "?+", msecond: "+?" };
+const halvesOf = (hours) => hours.map((v) => HALF[v] ?? "??").join("");
+
+export function kyivNow(d = new Date()) {
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Europe/Kyiv", year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    })
+      .formatToParts(d)
+      .map((x) => [x.type, x.value])
+  );
+  return { date: `${p.year}-${p.month}-${p.day}`, minute: Number(p.hour) * 60 + Number(p.minute) };
+}
+
+function nextDate(iso) {
+  const d = new Date(`${iso}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// слот = півгодина від півночі сьогодні (0..95)
+const hhmm = (i) => `${String(Math.floor((i % 48) / 2)).padStart(2, "0")}:${i % 2 ? "30" : "00"}`;
+const atTime = (i) => (i >= 48 ? `завтра о ${hhmm(i)}` : `о ${hhmm(i)}`); // подія: «о 18:00», «завтра о 00:00»
+const untilTime = (i) => (i === 48 ? "24:00" : `${hhmm(i)}${i > 48 ? " завтра" : ""}`); // кінець: «до 24:00»
+const fromTime = (i) => (i >= 48 ? `завтра з ${hhmm(i)}` : `з ${hhmm(i)}`);
+const range = (a, b) =>
+  b === 48 ? `${hhmm(a)}–24:00` : `${hhmm(a)}–${hhmm(b)}${b > 48 ? " завтра" : ""}`;
+
+export const fmtLeft = (min) => {
+  const h = Math.floor(min / 60), m = min % 60;
+  return [h && `${h} год`, m && `${m} хв`].filter(Boolean).join(" ") || "менше хвилини";
+};
+const fmtLen = (halves) => (halves === 1 ? "30 хв" : `${String(halves / 2).replace(".", ",")} год`);
+
+const STATE = {
+  "+": { icon: "🟢", now: "світло є", next: "світло" },
+  "-": { icon: "🔴", now: "світла немає", next: "без світла" },
+  "?": { icon: "🟡", now: "можливе відключення", next: "можливе відключення" },
+};
+
+// Відповідь на «Коли світло?» за збереженим графіком (last_days)
+export function whenLight(lastDaysJson, now = new Date()) {
+  const { date, minute } = kyivNow(now);
+  const days = JSON.parse(lastDaysJson || "{}");
+  if (!days[date]) return "Графіка на сьогодні поки немає.";
+  const tomorrow = days[nextDate(date)];
+  const h = halvesOf(days[date]) + (tomorrow ? halvesOf(tomorrow) : "");
+  const slot = Math.floor(minute / 30);
+  const cur = h[slot];
+  let j = slot;
+  while (j < h.length && h[j] === cur) j++;
+
+  const lines = [`${STATE[cur].icon} <b>Зараз за графіком ${STATE[cur].now}</b>`];
+  const noTomorrow = tomorrow ? "" : "\n<i>Графік на завтра ще не опубліковано</i>";
+  if (j >= h.length) {
+    const till = tomorrow ? "до кінця завтрашньої доби" : "до кінця доби";
+    lines.push(cur === "+" ? `Відключень за графіком ${till} немає` : `За графіком — ${till}`);
+    return lines.join("\n") + noTomorrow;
+  }
+  const left = fmtLeft(j * 30 - minute);
+  lines.push(cur === "-" ? `Дадуть ${atTime(j)} — через ${left}` : `До ${untilTime(j)} — ще ${left}`);
+  let k = j;
+  while (k < h.length && h[k] === h[j]) k++;
+  const nxt = STATE[h[j]];
+  lines.push(
+    k >= h.length
+      ? `Далі: ${nxt.icon} ${nxt.next} ${fromTime(j)} і до кінця доби`
+      : `Далі: ${nxt.icon} ${nxt.next} ${range(j, k)} (${fmtLen(k - j)})`
+  );
+  return lines.join("\n") + (k >= h.length ? noTomorrow : "");
+}
+
+async function showNow(env, chatId, user) {
+  if (!user || user.state !== "active") return showStatus(env, chatId, user);
+  return send(env, chatId, whenLight(user.last_days), { reply_markup: kbFor(user) });
+}
+
 async function showStatus(env, chatId, user) {
   if (!user || user.state === "awaiting_street" || user.state === "awaiting_house") {
     return send(env, chatId, "Спершу вкажіть адресу — /address");
@@ -443,7 +529,7 @@ async function onMessage(env, msg) {
       "💬 Напишіть одним повідомленням, що подобається, що ні або що не працює — я передам адміністратору."
     );
   }
-  const isButton = [BTN_SCHEDULE, BTN_ADDRESS, BTN_WARN_ON, BTN_WARN_OFF].includes(text);
+  const isButton = [BTN_NOW, BTN_SCHEDULE, BTN_ADDRESS, BTN_WARN_ON, BTN_WARN_OFF].includes(text);
   if (fbWaiting && !cmd && !isButton) return sendFeedback(env, chatId, user, text);
 
   if (cmd === "/start") {
@@ -460,6 +546,7 @@ async function onMessage(env, msg) {
   }
   if (cmd === "/address" || text === BTN_ADDRESS) return askStreet(env, chatId);
   if (cmd === "/status" || text === BTN_SCHEDULE) return showStatus(env, chatId, user);
+  if (cmd === "/light" || text === BTN_NOW) return showNow(env, chatId, user);
   if (text === BTN_WARN_ON || text === BTN_WARN_OFF) return setWarn(env, chatId, user, text === BTN_WARN_ON);
   if (cmd === "/stop") {
     if (user) await setUser(env, chatId, { state: "stopped" });

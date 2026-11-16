@@ -225,7 +225,7 @@ class CheckerTest(unittest.TestCase):
         self.add(2, warn=0)
         self.today = ["yes"] * 14 + ["no"] * 4 + ["yes"] * 4 + ["no"] * 2
         self.run_at(9, 0)
-        kb = {m["cid"]: m["kb"]["keyboard"][1][0]["text"] for m in self.sent}
+        kb = {m["cid"]: m["kb"]["keyboard"][-1][0]["text"] for m in self.sent}
         self.assertEqual(kb, {1: "🔕 Не попереджати про світло", 2: "⏰ Попереджати про світло"})
 
     # ---------------------------------------------------------------- доставка

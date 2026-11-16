@@ -40,7 +40,8 @@ BTN_WARN_OFF = "🔕 Не попереджати про світло"
 def main_keyboard(warn_on: bool) -> dict:
     """Меню під полем вводу; кнопка попереджень показує дію, а не стан."""
     return {
-        "keyboard": [[{"text": "📅 Графік"}, {"text": "📍 Змінити адресу"}],
+        "keyboard": [[{"text": "💡 Коли світло?"}, {"text": "📅 Графік"}],
+                     [{"text": "📍 Змінити адресу"}],
                      [{"text": BTN_WARN_OFF if warn_on else BTN_WARN_ON}]],
         "resize_keyboard": True,
         "is_persistent": True,
