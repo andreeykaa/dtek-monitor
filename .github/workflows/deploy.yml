@@ -95,12 +95,19 @@ jobs:
             --arg url "$WORKER_URL/telegram" --arg s "$WEBHOOK_SECRET" \
             '{url:$url, secret_token:$s, allowed_updates:["message","callback_query"]}')" | jq -e '.ok' >/dev/null \
             || { echo "::error::Telegram не прийняв webhook — перевірте TELEGRAM_BOT_TOKEN"; exit 1; }
-          curl -fsS --retry 4 --retry-all-errors --retry-delay 3 "$TG/setMyCommands" -H "Content-Type: application/json" -d '{"commands":[
-            {"command":"status","description":"Поточний графік"},
+          CMDS='[{"command":"status","description":"Поточний графік"},
             {"command":"address","description":"Змінити адресу"},
             {"command":"stop","description":"Відписатися від сповіщень"},
             {"command":"delete","description":"Видалити мої дані"},
-            {"command":"start","description":"Почати / підписатися знову"}]}' >/dev/null
+            {"command":"start","description":"Почати / підписатися знову"}]'
+          curl -fsS --retry 4 --retry-all-errors --retry-delay 3 "$TG/setMyCommands" -H "Content-Type: application/json" \
+            -d "$(jq -n --argjson c "$CMDS" '{commands:$c}')" >/dev/null
+          if [ -n "$ADMIN_CHAT_ID" ]; then
+            # меню з /broadcast бачить лише адмін
+            curl -fsS --retry 4 --retry-all-errors --retry-delay 3 "$TG/setMyCommands" -H "Content-Type: application/json" \
+              -d "$(jq -n --argjson c "$CMDS" --arg id "$ADMIN_CHAT_ID" \
+                '{commands:($c + [{command:"broadcast",description:"Повідомлення всім (адмін)"}]), scope:{type:"chat",chat_id:($id|tonumber)}}')" >/dev/null
+          fi
           curl -fsS --retry 4 --retry-all-errors --retry-delay 3 "$TG/setMyShortDescription" -H "Content-Type: application/json" \
             -d '{"short_description":"Сповіщення про зміни графіка відключень ДТЕК Київські електромережі за вашою адресою"}' >/dev/null
           curl -fsS --retry 4 --retry-all-errors --retry-delay 3 "$TG/setMyDescription" -H "Content-Type: application/json" \

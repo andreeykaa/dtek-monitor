@@ -283,6 +283,42 @@ async function showStatus(env, chatId, user) {
   return send(env, chatId, user.last_text, { reply_markup: MAIN_KEYBOARD });
 }
 
+// ---------------------------------------------------------------- розсилка (лише адмін)
+
+const isAdmin = (env, chatId) => !!env.ADMIN_CHAT_ID && String(chatId) === String(env.ADMIN_CHAT_ID);
+export const broadcastHtml = (body) => `📢 <b>ДТЕК Монітор</b>\n\n${esc(body)}`;
+
+async function setMeta(env, key, value) {
+  if (value == null) return env.DB.prepare("DELETE FROM meta WHERE key = ?").bind(key).run();
+  return env.DB.prepare(
+    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+  )
+    .bind(key, value)
+    .run();
+}
+
+async function onBroadcast(env, chatId, text) {
+  const body = text.replace(/^\/broadcast(@\S+)?/i, "").trim();
+  if (!body) {
+    return send(
+      env,
+      chatId,
+      "Використання: <code>/broadcast текст повідомлення</code>\n\nТекст можна писати в кілька рядків. Перед відправкою я покажу, як він виглядатиме."
+    );
+  }
+  if (body.length > 3500) return send(env, chatId, `Задовгий текст: ${body.length} символів (максимум 3500).`);
+  const { n } = await env.DB.prepare("SELECT count(*) AS n FROM users WHERE state = 'active'").first();
+  await setMeta(env, "broadcast_draft", body);
+  return send(env, chatId, `<i>Так побачать повідомлення ${n} активних користувачів:</i>\n\n${broadcastHtml(body)}`, {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: `📤 Надіслати (${n})`, callback_data: "bc:send" }],
+        [{ text: "Скасувати", callback_data: "bc:no" }],
+      ],
+    },
+  });
+}
+
 async function onMessage(env, msg) {
   if (msg.chat?.type !== "private" || typeof msg.text !== "string") return;
   const chatId = msg.chat.id;
@@ -329,7 +365,10 @@ async function onMessage(env, msg) {
       }
     );
   }
-  if (cmd === "/help") return send(env, chatId, HELP);
+  if (cmd === "/help") {
+    return send(env, chatId, HELP + (isAdmin(env, chatId) ? "\n\n<b>Адмін:</b>\n• /broadcast текст — повідомлення всім активним" : ""));
+  }
+  if (cmd === "/broadcast" && isAdmin(env, chatId)) return onBroadcast(env, chatId, text);
 
   if (!user) return askStreet(env, chatId, WELCOME);
   if (cmd) return send(env, chatId, HELP);
@@ -359,6 +398,25 @@ async function onCallback(env, cb) {
       message_id: cb.message.message_id,
       reply_markup: { inline_keyboard: [] },
     });
+
+  if ((data === "bc:send" || data === "bc:no") && isAdmin(env, chatId)) {
+    await clearButtons();
+    const draft = await env.DB.prepare("SELECT value FROM meta WHERE key = 'broadcast_draft'").first();
+    await setMeta(env, "broadcast_draft", null);
+    if (data === "bc:no") return send(env, chatId, "Розсилку скасовано.");
+    if (!draft) return send(env, chatId, "Чернетку не знайдено — надішліть /broadcast ще раз.");
+    await setMeta(
+      env,
+      "broadcast",
+      JSON.stringify({ html: broadcastHtml(draft.value), admin: chatId, at: new Date().toISOString() })
+    );
+    const fast = await triggerCheck(env, "broadcast");
+    return send(
+      env,
+      chatId,
+      `⏳ Розсилку поставлено в чергу — піде ${fast ? "за 1–2 хвилини" : "з найближчою перевіркою (до 10 хв)"}. Надішлю звіт.`
+    );
+  }
 
   if (data === "del:yes") {
     await env.DB.prepare("DELETE FROM users WHERE chat_id = ?").bind(chatId).run();

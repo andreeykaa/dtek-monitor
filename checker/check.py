@@ -554,8 +554,22 @@ def main() -> int:
         if keep != old_days or text != u["last_text"] or grp != u["grp"]:
             upd(u, grp=grp, last_days=json.dumps(keep), last_text=text)
 
+    # ---------- повідомлення адміна всім активним (/broadcast)
+    bc_rows = db.q("SELECT value FROM meta WHERE key = 'broadcast'")
+    broadcast = json.loads(bc_rows[0]["value"]) if bc_rows else None
+    bc_ids = [u["chat_id"] for u in users if u["state"] == "active"] if broadcast else []
+    for cid in bc_ids:
+        outbox.setdefault(cid, []).append((broadcast["html"], True))
+
     # ---------- розсилка (паралельно) і одне пакетне оновлення бази
     results = send_all(outbox)
+    if broadcast:
+        db.q("DELETE FROM meta WHERE key = 'broadcast'")
+        ok_n = sum(results.get(c) == "ok" for c in bc_ids)
+        fail_n = len(bc_ids) - ok_n
+        tg_send(broadcast["admin"], f"✅ Розсилку надіслано: {ok_n} з {len(bc_ids)}"
+                + (f" (не доставлено: {fail_n})" if fail_n else ""), keyboard=False)
+        log(f"Розсилка адміна: {ok_n}/{len(bc_ids)}")
     for cid, st in results.items():
         if st == "error" and cid in updates:
             # не доставили — не запам'ятовуємо зміни, щоб наступна перевірка надіслала ще раз
