@@ -15,8 +15,7 @@ const mainKeyboard = (warnOn) => ({
     [{ text: BTN_ADDRESS }],
     [{ text: warnOn ? BTN_WARN_OFF : BTN_WARN_ON }],
   ],
-  resize_keyboard: true,
-  is_persistent: true,
+  resize_keyboard: true, // без is_persistent — з'являється перемикач ⊞/⌄, меню можна згорнути
 });
 const kbFor = (user) => mainKeyboard(user?.warn === 1);
 

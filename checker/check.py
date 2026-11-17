@@ -43,8 +43,7 @@ def main_keyboard(warn_on: bool) -> dict:
         "keyboard": [[{"text": "💡 Коли світло?"}, {"text": "📅 Графік"}],
                      [{"text": "📍 Змінити адресу"}],
                      [{"text": BTN_WARN_OFF if warn_on else BTN_WARN_ON}]],
-        "resize_keyboard": True,
-        "is_persistent": True,
+        "resize_keyboard": True,  # без is_persistent — меню можна згорнути (⊞/⌄)
     }
 
 
