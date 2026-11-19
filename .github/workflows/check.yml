@@ -48,7 +48,14 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('checker/requirements.txt') }}
 
       - name: Встановити Chromium
-        run: python -m playwright install --with-deps chromium
+        # сервери пакетів Ubuntu іноді не відповідають — до 3 спроб з паузою
+        run: |
+          for i in 1 2 3; do
+            python -m playwright install --with-deps chromium && exit 0
+            echo "::warning::Спроба $i не вдалась, повтор через 15 с"
+            sleep 15
+          done
+          exit 1
 
       - name: Перевірити графіки
         run: python checker/check.py
