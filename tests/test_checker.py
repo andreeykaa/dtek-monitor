@@ -148,7 +148,7 @@ class CheckerTest(unittest.TestCase):
         self.today = ["yes"] * 14 + ["no"] * 4 + ["yes"] * 4 + ["no"] * 2
         self.run_at(9, 0)
         self.assertIn("Змінився графік на сьогодні", self.texts(1)[0])
-        self.assertIn("Було:", self.texts(1)[0])
+        self.assertIn("Раніше без світла:", self.texts(1)[0])
         self.tomorrow = ["yes"] * 24
         self.run_at(9, 10)
         self.assertIn("З'явився графік на завтра", self.texts(1)[0])

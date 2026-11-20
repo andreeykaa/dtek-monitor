@@ -307,7 +307,9 @@ def day_html(d_iso, label, hours, tag="", old=None):
         maybe = f" · можливо {dur(h.count('?'))}" if "?" in h else ""
         lines.append(f"<i>Разом: світло {dur(h.count('+'))} · без світла {dur(h.count('-'))}{maybe}</i>")
     if old and old != hours:
-        lines.append(f"<i>Було: {describe(old)}</i>")
+        was = describe(old)
+        lines.append("<i>Раніше відключень не було</i>" if was == "відключень немає"
+                     else f"<i>Раніше без світла: {was}</i>")
     return "\n".join(lines)
 
 
