@@ -57,6 +57,7 @@ class CheckerTest(unittest.TestCase):
         self.fail_for = {}   # chat_id -> 'blocked' | 'error'
         self.today, self.tomorrow = TODAY, None
         self.houses = {"7": {"sub_type_reason": ["GPV33.1"]}}
+        self.banner = None
 
         def fake_send(cid, text, keyboard=None, silent=False):
             self.sent.append({"cid": cid, "text": plain(text), "kb": keyboard, "silent": silent})
@@ -69,7 +70,8 @@ class CheckerTest(unittest.TestCase):
                 data[str(ts1)] = {"GPV33.1": {str(i + 1): v for i, v in enumerate(self.tomorrow)}}
             return {"fact": {"data": data, "update": "17.11.2026 10:00"},
                     "allStreets": ["просп. Голосіївський", "вул. Хрещатик"],
-                    "houses": {s: {"data": self.houses} for s in streets}}
+                    "houses": {s: {"data": self.houses, "updateTimestamp": "12:48 20.11.2026"} for s in streets},
+                    "banner": self.banner}
 
         self.patches = {"D1": check.D1, "tg_send": check.tg_send, "fetch_site": check.fetch_site,
                         "datetime": check.datetime, "log": check.log}
@@ -292,8 +294,48 @@ class CheckerTest(unittest.TestCase):
         check.D1.q = counting
         self.tomorrow = ["yes"] * 24
         self.run_at(12, 30)
-        self.assertLessEqual(len(calls), 10)
+        self.assertLessEqual(len(calls), 15)  # +спостереження (стан, журнал, банер)
         self.assertEqual(len(self.sent), 300 + 150)  # графік на завтра всім + попередження половині
+
+    # ---------------------------------------------------------------- тихе спостереження
+
+    def obs(self):
+        return [dict(r) for r in self.con.execute(
+            "SELECT street, house, type, sub_type, start_date, end_date FROM outage_log ORDER BY id")]
+
+    def test_observation_logs_only_changes_and_sends_nothing(self):
+        self.add(1)
+        self.run_at(11, 0)
+        self.assertEqual(len(self.obs()), 1)          # перший знімок: стан «порожньо»
+        self.assertEqual(self.obs()[0]["sub_type"], "")
+        emergency = {"type": "2", "start_date": "11:45 20.11.2026", "end_date": "16:11 20.11.2026",
+                     "sub_type": "Екстренні відключення (Аварійне без застосування графіку погодинних відключень)"}
+        self.houses = {"7": {"sub_type_reason": ["GPV33.1"], **emergency}}
+        self.banner = "Шановні клієнти! В інших районах столиці діють екстрені відключення."
+        sent = self.run_at(11, 50)
+        self.assertEqual(sent, [])                    # людям — нічого
+        log = self.obs()
+        self.assertEqual(len(log), 3)                 # зміна будинку + банер
+        self.assertEqual(log[1]["type"], "2")
+        self.assertEqual(log[1]["end_date"], "16:11 20.11.2026")
+        self.assertEqual(log[2]["street"], "*")
+        self.run_at(12, 0)
+        self.assertEqual(len(self.obs()), 3)          # без змін — без записів
+        self.houses["7"]["end_date"] = "18:00 20.11.2026"
+        self.run_at(12, 10)
+        self.assertEqual(self.obs()[-1]["end_date"], "18:00 20.11.2026")
+        self.houses = {"7": {"sub_type_reason": ["GPV33.1"]}}
+        self.run_at(16, 20)
+        self.assertEqual(self.obs()[-1]["type"], "")  # відключення зникло
+
+    def test_observation_failure_does_not_break_check(self):
+        self.add(1)
+        orig = check.observe
+        check.observe = lambda *a: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            self.run_at(9, 0)                         # main() повертає 0 — перевірка жива
+        finally:
+            check.observe = orig
 
 
 if __name__ == "__main__":

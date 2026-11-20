@@ -153,6 +153,15 @@ async ({streets}) => {
       .match(/DisconSchedule\.fact\s*=\s*(\{[\s\S]*?\})\s*(?:;|<\/script>)/);
     if (m) { try { fact = JSON.parse(m[1]); } catch (e) {} }
   }
+  // текст вікна «Шановні клієнти!» (для спостереження; вільний текст, лише записуємо)
+  let banner = null;
+  try {
+    const t = [...document.querySelectorAll('.modal, [class*="modal"], [class*="popup"], [role="dialog"]')]
+      .map(e => (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim())
+      .filter(t => /Шановні клієнти/.test(t) && t.length > 25 && t.length < 3000)
+      .sort((a, b) => b.length - a.length)[0];
+    banner = t || null;
+  } catch (e) {}
   if (!fact || !fact.data || !Object.keys(fact.data).length) {
     // сторінка без графіка — повертаємо діагностику, без запитів по вулицях
     let ds = null;
@@ -181,7 +190,7 @@ async ({streets}) => {
     await new Promise(r => setTimeout(r, 300));
   } };
   await Promise.all([worker(), worker(), worker()]);  // по 3 запити одночасно
-  return {fact, allStreets, houses};
+  return {fact, allStreets, houses, banner};
 }
 """
 
@@ -500,6 +509,57 @@ def warn_html(t, state, end_idx, total, k, mins, changed):
     return f"{title}\n" + " · ".join(parts)
 
 
+# ============================================================ тихе спостереження (етап 1)
+
+OBSERVE = True  # записувати зміни полів ДТЕК про екстрені/аварійні відключення; людям нічого не надсилається
+OBS_FIELDS = ("type", "sub_type", "start_date", "end_date")
+
+
+def observe(db, users, houses_by_street, banner, now):
+    """Записує в outage_log лише зміни стану для будинків активних користувачів і зміни банера."""
+    at = now.isoformat(timespec="seconds")
+    cur = {}
+    for u in users:
+        if u["state"] != "active":
+            continue
+        resp = houses_by_street.get(u["street"])
+        houses = (resp or {}).get("data") or {}
+        key = find_house(houses, u["house"]) if houses else None
+        if key is None:
+            continue
+        h = houses[key]
+        fields = {f: (h.get(f) or "") for f in OBS_FIELDS}
+        cur[(u["street"], key)] = (fields, (resp or {}).get("updateTimestamp") or "")
+
+    old = {(r["street"], r["house"]): r["sig"] for r in db.q("SELECT street, house, sig FROM outage_state")}
+    changes = []
+    for (street, house), (fields, upd) in cur.items():
+        sig = "|".join(fields[f] for f in OBS_FIELDS)
+        if old.get((street, house)) != sig:
+            changes.append({"street": street, "house": house, "sig": sig, "upd": upd, **fields})
+
+    prev_banner = db.q("SELECT value FROM meta WHERE key = 'obs_banner'")
+    banner_changed = bool(banner) and (not prev_banner or prev_banner[0]["value"] != banner)
+
+    if changes:
+        payload = json.dumps(changes, ensure_ascii=False)
+        db.q("INSERT INTO outage_log (at, street, house, type, sub_type, start_date, end_date, dtek_upd) "
+             "SELECT ?, j.value->>'street', j.value->>'house', j.value->>'type', j.value->>'sub_type', "
+             "j.value->>'start_date', j.value->>'end_date', j.value->>'upd' FROM json_each(?) AS j", at, payload)
+        db.q("INSERT INTO outage_state (street, house, sig, since) "
+             "SELECT j.value->>'street', j.value->>'house', j.value->>'sig', ? FROM json_each(?) AS j WHERE true "
+             "ON CONFLICT(street, house) DO UPDATE SET sig = excluded.sig, since = excluded.since", at, payload)
+    if banner_changed:
+        db.q("INSERT INTO outage_log (at, street, house, sub_type) VALUES (?, '*', '', ?)", at, banner)
+        db.q("INSERT INTO meta (key, value) VALUES ('obs_banner', ?) "
+             "ON CONFLICT(key) DO UPDATE SET value = excluded.value", banner)
+
+    active = sum(1 for f, _ in cur.values() if f["type"] or f["sub_type"])
+    # у публічний журнал — лише лічильники, без адрес
+    log(f"Спостереження: будинків {len(cur)}, з відключенням зараз: {active}, змін: {len(changes)}"
+        + (", банер змінився" if banner_changed else ""))
+
+
 # ============================================================ основне
 
 def main() -> int:
@@ -526,6 +586,8 @@ def main() -> int:
         key=lambda s: checked.get(s, ""),
     )
     query = need | set(stale[:REFRESH_PER_RUN])
+    if OBSERVE:  # спостереження: щоразу питаємо всі вулиці активних користувачів
+        query |= {u["street"] for u in users if u["state"] == "active"}
     log(f"Користувачів: {len(users)} (нових адрес: {len(pending)}), запитів вулиць до ДТЕК: {len(query)}")
 
     site = fetch_site(query)
@@ -679,6 +741,12 @@ def main() -> int:
             upd(u, state="stopped")
             log(f"{anon(cid)}: заблокував бота — відписано")
     apply_updates(db, list(updates.values()))
+
+    if OBSERVE:
+        try:
+            observe(db, users, houses_by_street, site.get("banner"), now)
+        except Exception as e:  # спостереження ніколи не має ламати основну перевірку
+            log(f"Спостереження: помилка {type(e).__name__}: {e}")
 
     if query:
         db.q("INSERT INTO meta (key, value) SELECT 'street:' || j.value, ? FROM json_each(?) AS j WHERE true "
