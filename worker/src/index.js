@@ -130,11 +130,12 @@ async function loadStreets(env) {
 }
 
 // Запустити позачергову перевірку на GitHub (щоб не чекати до 10 хв)
-async function triggerCheck(env, reason) {
-  if (!env.GH_TOKEN || !env.GH_REPO) return false;
-  const r = await fetch(
-    `https://api.github.com/repos/${env.GH_REPO}/actions/workflows/check.yml/dispatches`,
-    {
+// Повертає HTTP-статус GitHub (204 — успіх, 0 — немає з'єднання)
+async function dispatchCheck(env, reason) {
+  if (!env.GH_TOKEN || !env.GH_REPO) return 0;
+  let r;
+  try {
+    r = await fetch(`https://api.github.com/repos/${env.GH_REPO}/actions/workflows/check.yml/dispatches`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${env.GH_TOKEN}`,
@@ -143,12 +144,17 @@ async function triggerCheck(env, reason) {
         "User-Agent": "dtek-monitor-bot",
       },
       body: JSON.stringify({ ref: "main", inputs: { reason } }),
-    }
-  );
+    });
+  } catch (e) {
+    console.error("GitHub dispatch: network", String(e));
+    return 0;
+  }
   if (r.status !== 204) console.error("GitHub dispatch:", r.status, await r.text());
   await checkTokenExpiry(env, r.headers.get("github-authentication-token-expiration"));
-  return r.status === 204;
+  return r.status;
 }
+
+const triggerCheck = async (env, reason) => (await dispatchCheck(env, reason)) === 204;
 
 // GitHub повідомляє дату закінчення токена: "2026-12-13 16:15:00 +0200" або "... UTC"
 export function parseGhDate(s) {
@@ -760,27 +766,46 @@ async function onCallback(env, cb) {
 
 // Cloudflare Cron (wrangler.toml) кожні 10 хв запускає перевірку на GitHub.
 // Розклад GitHub Actions ненадійний, тож запускаємо самі.
+const DISPATCH_ALERT_AFTER = 2; // попереджати лише після стількох невдач поспіль (~20 хв)
+
+const hmKyiv = (iso) => {
+  const m = kyivNow(new Date(iso)).minute;
+  return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+};
+
+export function dispatchAlertText(status, sinceIso) {
+  if (status === 401 || status === 403 || status === 404) {
+    return (
+      `⚠️ <b>ДТЕК Монітор:</b> GitHub не приймає токен <code>GH_DISPATCH_TOKEN</code> (помилка ${status}) — ` +
+      "перевірки графіка не запускаються.\n\n" +
+      "Створіть новий токен (Actions: Read and write), оновіть секрет у GitHub і запустіть «Розгортання бота»."
+    );
+  }
+  const what = status ? `помилка ${status}` : "немає з'єднання";
+  return (
+    `⚠️ <b>ДТЕК Монітор:</b> збій GitHub (${what}), перевірки не запускаються з ${hmKyiv(sinceIso)}. ` +
+    "Робити нічого не потрібно — повідомлю, коли відновляться."
+  );
+}
+
 async function onSchedule(env) {
-  const ok = await triggerCheck(env, "cron");
-  const alerted = await env.DB.prepare("SELECT value FROM meta WHERE key = 'dispatch_alert'").first();
-  if (ok && alerted) {
-    await env.DB.prepare("DELETE FROM meta WHERE key = 'dispatch_alert'").run();
-    if (env.ADMIN_CHAT_ID) await send(env, env.ADMIN_CHAT_ID, "✅ Перевірки графіка знову запускаються.");
-  }
-  if (!ok && !alerted) {
-    await env.DB.prepare("INSERT INTO meta (key, value) VALUES ('dispatch_alert', ?)")
-      .bind(new Date().toISOString())
-      .run();
-    if (env.ADMIN_CHAT_ID) {
-      await send(
-        env,
-        env.ADMIN_CHAT_ID,
-        "⚠️ <b>ДТЕК Монітор:</b> не вдається запустити перевірку на GitHub.\n\n" +
-          "Найімовірніше, закінчився термін дії <code>GH_DISPATCH_TOKEN</code> — створіть новий, " +
-          "оновіть секрет і запустіть «Розгортання бота»."
-      );
+  const status = await dispatchCheck(env, "cron");
+  const fail = JSON.parse((await getMeta(env, "dispatch_fail")) || "null"); // {n, since, alerted}
+  if (status === 204) {
+    if (!fail) return;
+    await setMeta(env, "dispatch_fail", null);
+    if (fail.alerted && env.ADMIN_CHAT_ID) {
+      const mins = Math.round((Date.now() - Date.parse(fail.since)) / 60000);
+      await send(env, env.ADMIN_CHAT_ID, `✅ Перевірки графіка знову запускаються (перерва ${mins} хв).`);
     }
+    return;
   }
+  const cur = { n: (fail?.n || 0) + 1, since: fail?.since || new Date().toISOString(), alerted: !!fail?.alerted };
+  if (!cur.alerted && cur.n >= DISPATCH_ALERT_AFTER && env.ADMIN_CHAT_ID) {
+    await send(env, env.ADMIN_CHAT_ID, dispatchAlertText(status, cur.since));
+    cur.alerted = true;
+  }
+  await setMeta(env, "dispatch_fail", JSON.stringify(cur));
 }
 
 // ---------------------------------------------------------------- entry

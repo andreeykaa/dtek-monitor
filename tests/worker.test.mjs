@@ -378,14 +378,30 @@ describe("розклад", () => {
     await cron();
     assert.deepEqual(dispatched, ["cron"]);
   });
-  test("збій запуску — одне попередження адміну, потім «знову працює»", async () => {
+  test("одиночний збій — без попередження", async () => {
+    ghStatus = 502;
+    await cron();
+    ghStatus = 204;
+    await cron();
+    assert.equal(sent.length, 0);
+  });
+  test("збій GitHub — одне попередження після двох невдач, потім «знову працює»", async () => {
+    ghStatus = 500;
+    await cron();
+    await cron();
+    await cron();
+    const alerts = sent.filter((m) => /збій GitHub \(помилка 500\)/.test(m.text));
+    assert.equal(alerts.length, 1);
+    assert.match(alerts[0].text, /не запускаються з \d\d:\d\d\. Робити нічого не потрібно/);
+    ghStatus = 204;
+    await cron();
+    assert.match(last().text, /знову запускаються \(перерва \d+ хв\)/);
+  });
+  test("недійсний токен — окремий текст", async () => {
     ghStatus = 401;
     await cron();
     await cron();
-    assert.equal(sent.filter((m) => /не вдається запустити/.test(m.text)).length, 1);
-    ghStatus = 204;
-    await cron();
-    assert.match(last().text, /знову запускаються/);
+    assert.match(last().text, /не приймає токен .*помилка 401/s);
   });
   test("попередження про закінчення токена — раз на добу", async () => {
     ghExpiry = new Date(Date.now() + 5 * 86400000 + 3600e3).toISOString().replace("T", " ").slice(0, 19) + " UTC";
