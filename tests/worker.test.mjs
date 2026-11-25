@@ -272,11 +272,19 @@ describe("адмін: /broadcast і /stats", () => {
     addActive(1);
     db.prepare("INSERT INTO users (chat_id, state) VALUES (2, 'awaiting_street')").run();
     db.prepare("INSERT INTO users (chat_id, state) VALUES (3, 'stopped')").run();
+    db.prepare(
+      "INSERT INTO users (chat_id, state, updated_at) VALUES (4, 'awaiting_house', datetime('now', '-3 days'))"
+    ).run();
+    db.prepare("INSERT INTO meta (key, value) VALUES ('nf:' || date('now', '-10 days'), '5')").run();
+    await msg(5, "/start");
+    await msg(5, "Неіснуюча");
+    await msg(5, "Теж неіснуюча");
     await msg(ADMIN, "/stats");
     const t = plain(last());
-    assert.match(t, /Усього: 4/);
+    assert.match(t, /Усього: 6/);
     assert.match(t, /Активні: 2 · ⏰ з попередженнями: 1/);
-    assert.match(t, /Реєструються: 1/);
+    assert.match(t, /Реєструються: 2 · покинули реєстрацію: 1/);
+    assert.match(t, /Не знайдено вулицю за 7 днів: 2/);
     assert.match(t, /Відписані: 1/);
     assert.match(t, /33 — 2/);
   });

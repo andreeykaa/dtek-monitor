@@ -228,6 +228,18 @@ async function takeHint(env, chatId) {
   return row?.value ?? null;
 }
 
+// Лічильник «вулицю не знайдено» по днях (meta nf:YYYY-MM-DD) — лише число, без тексту від людини
+async function countNotFound(env) {
+  const day = new Date().toISOString().slice(0, 10);
+  await env.DB.prepare(
+    "INSERT INTO meta (key, value) VALUES (?, '1') " +
+      "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1"
+  )
+    .bind(`nf:${day}`)
+    .run();
+  await env.DB.prepare("DELETE FROM meta WHERE key LIKE 'nf:%' AND key < 'nf:' || date('now', '-30 days')").run();
+}
+
 async function onStreetText(env, chatId, text) {
   const streets = await loadStreets(env);
   // спершу шукаємо як є (бувають вулиці з цифрами: «8 Березня»),
@@ -252,6 +264,7 @@ async function onStreetText(env, chatId, text) {
   }
   const { total, items } = found;
   if (!total) {
+    await countNotFound(env);
     return send(
       env,
       chatId,
@@ -444,7 +457,14 @@ async function onStats(env, chatId) {
   const { results } = await env.DB.prepare("SELECT state, count(*) AS n FROM users GROUP BY state").all();
   const by = Object.fromEntries(results.map((r) => [r.state, r.n]));
   const total = results.reduce((a, r) => a + r.n, 0);
-  const registering = (by.awaiting_street || 0) + (by.awaiting_house || 0) + (by.pending || 0);
+  // хто нічого не робив понад добу — покинув реєстрацію
+  const reg = await one(
+    "SELECT sum(updated_at >= datetime('now', '-1 day')) AS fresh, sum(updated_at < datetime('now', '-1 day')) AS old " +
+      "FROM users WHERE state IN ('awaiting_street', 'awaiting_house', 'pending')"
+  );
+  const notFound = (
+    await one("SELECT sum(CAST(value AS INTEGER)) AS n FROM meta WHERE key LIKE 'nf:%' AND key >= 'nf:' || date('now', '-6 days')")
+  ).n;
   const warnOn = (await one("SELECT count(*) AS n FROM users WHERE state = 'active' AND warn = 1")).n;
   const new7 = (await one("SELECT count(*) AS n FROM users WHERE created_at >= datetime('now', '-7 days')")).n;
   const streets = (await one("SELECT count(DISTINCT street) AS n FROM users WHERE state = 'active'")).n;
@@ -458,7 +478,8 @@ async function onStats(env, chatId) {
     "📊 <b>Статистика</b>",
     `👥 Усього: ${total}`,
     `✅ Активні: ${by.active || 0} · ⏰ з попередженнями: ${warnOn}`,
-    `📝 Реєструються: ${registering}`,
+    `📝 Реєструються: ${reg.fresh || 0} · покинули реєстрацію: ${reg.old || 0}`,
+    `😕 Не знайдено вулицю за 7 днів: ${notFound || 0}`,
     `🔕 Відписані: ${by.stopped || 0}`,
     `🆕 Нові за 7 днів: ${new7}`,
     `📍 Різних вулиць: ${streets}`,
