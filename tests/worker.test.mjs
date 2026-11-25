@@ -290,6 +290,46 @@ describe("адмін: /broadcast і /stats", () => {
   });
 });
 
+describe("адмін: /remind", () => {
+  const abandoned = (id, state, street = null) =>
+    db.prepare(
+      "INSERT INTO users (chat_id, state, street, updated_at) VALUES (?, ?, ?, datetime('now', '-2 days'))"
+    ).run(id, state, street);
+
+  test("недоступна звичайним користувачам", async () => {
+    abandoned(2, "awaiting_street");
+    await msg(1, "/remind");
+    assert.ok(!sent.some((m) => m.chat_id === 2));
+    assert.doesNotMatch(last().text, /Нагадування отримають/);
+  });
+
+  test("показує кількість, надсилає один раз, правильний текст для кроку", async () => {
+    abandoned(2, "awaiting_street");
+    abandoned(3, "awaiting_house", "вул. Хрещатик");
+    db.prepare("INSERT INTO users (chat_id, state) VALUES (4, 'awaiting_street')").run(); // свіжий — не чіпаємо
+    addActive(5);
+    await msg(ADMIN, "/remind");
+    assert.match(plain(last()), /Нагадування отримають 2 .*на вулиці: 1, на будинку: 1/s);
+    sent = [];
+    await tap(ADMIN, "rm:send");
+    const to = (id) => sent.find((m) => m.chat_id === id);
+    assert.match(to(2).text, /Залишилось вказати адресу/);
+    assert.match(to(3).text, /номер будинку на вулиці вул\. Хрещатик/);
+    assert.ok(!to(4) && !to(5));
+    assert.match(plain(last()), /Нагадування надіслано: 2/);
+    await msg(ADMIN, "/remind");
+    assert.match(last().text, /Нікому нагадувати/);
+  });
+
+  test("скасування нічого не надсилає", async () => {
+    abandoned(2, "awaiting_street");
+    await msg(ADMIN, "/remind");
+    sent = [];
+    await tap(ADMIN, "rm:no");
+    assert.ok(!sent.some((m) => m.chat_id === 2));
+  });
+});
+
 describe("відгуки", () => {
   test("/feedback текст → адмін → Reply → користувач", async () => {
     addActive(1);

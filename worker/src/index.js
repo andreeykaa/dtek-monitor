@@ -432,6 +432,67 @@ async function onBroadcast(env, chatId, text) {
   });
 }
 
+// ---------------------------------------------------------------- нагадування тим, хто покинув реєстрацію (адмін)
+
+const REMIND_MAX = 40; // ліміт запитів воркера за один виклик — решта наступного разу
+const REMIND_WHO =
+  "FROM users u WHERE u.state IN ('awaiting_street', 'awaiting_house') " +
+  "AND u.updated_at < datetime('now', '-1 day') " +
+  "AND NOT EXISTS (SELECT 1 FROM meta m WHERE m.key = 'remind:' || u.chat_id)";
+
+export const remindText = (user) =>
+  user.state === "awaiting_house" && user.street
+    ? `👋 Ви не завершили налаштування.\n\nНадішліть номер будинку на вулиці ${esc(user.street)} — і бот повідомлятиме, коли зміниться графік відключень або з'явиться графік на завтра.`
+    : "👋 Ви не завершили налаштування.\n\nЗалишилось вказати адресу. Надішліть назву вулиці — і бот повідомлятиме про зміни графіка відключень.";
+
+async function onRemind(env, chatId) {
+  const r = await env.DB.prepare(
+    `SELECT count(*) AS n, sum(u.state = 'awaiting_street') AS st, sum(u.state = 'awaiting_house') AS hs ${REMIND_WHO}`
+  ).first();
+  if (!r.n) return send(env, chatId, "Нікому нагадувати: усі, хто покинув реєстрацію, вже отримали нагадування.");
+  const batch = Math.min(r.n, REMIND_MAX);
+  const note = r.n > REMIND_MAX ? `\nЗа раз надішлю ${REMIND_MAX}, решту — наступною командою.` : "";
+  return send(
+    env,
+    chatId,
+    `Нагадування отримають <b>${r.n}</b> — ті, хто покинув реєстрацію понад добу тому ` +
+      `(на вулиці: ${r.st || 0}, на будинку: ${r.hs || 0}). Кожен отримає його лише раз.${note}\n\n` +
+      `<i>Так виглядатиме:</i>\n\n${remindText({ state: "awaiting_street" })}`,
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: `📤 Надіслати (${batch})`, callback_data: "rm:send" }],
+          [{ text: "Скасувати", callback_data: "rm:no" }],
+        ],
+      },
+    }
+  );
+}
+
+async function sendReminders(env, chatId) {
+  const { results } = await env.DB.prepare(`SELECT u.chat_id, u.state, u.street ${REMIND_WHO} LIMIT ${REMIND_MAX}`).all();
+  let ok = 0;
+  let blocked = 0;
+  for (const u of results) {
+    const res = await send(env, u.chat_id, remindText(u));
+    // позначаємо лише доставлені й заблоковані — інші спробуємо наступного разу
+    if (res.ok || res.error_code === 403) await setMeta(env, `remind:${u.chat_id}`, new Date().toISOString());
+    if (res.ok) ok++;
+    else if (res.error_code === 403) {
+      blocked++;
+      await setUser(env, u.chat_id, { state: "stopped" });
+    }
+  }
+  const failed = results.length - ok - blocked;
+  return send(
+    env,
+    chatId,
+    `✅ Нагадування надіслано: ${ok}` +
+      (blocked ? `\n🚫 Заблокували бота: ${blocked} (позначив як відписаних)` : "") +
+      (failed ? `\n⚠️ Не вдалося надіслати: ${failed}` : "")
+  );
+}
+
 // ---------------------------------------------------------------- попередження за 30 хв
 
 async function setWarn(env, chatId, user, on) {
@@ -606,6 +667,7 @@ async function onMessage(env, msg) {
   }
   if (cmd === "/broadcast" && isAdmin(env, chatId)) return onBroadcast(env, chatId, text);
   if (cmd === "/stats" && isAdmin(env, chatId)) return onStats(env, chatId);
+  if (cmd === "/remind" && isAdmin(env, chatId)) return onRemind(env, chatId);
 
   if (!user) return askStreet(env, chatId, WELCOME);
   if (cmd) return send(env, chatId, HELP);
@@ -653,6 +715,12 @@ async function onCallback(env, cb) {
       chatId,
       `⏳ Розсилку поставлено в чергу — піде ${fast ? "за 1–2 хвилини" : "з найближчою перевіркою (до 10 хв)"}. Надішлю звіт.`
     );
+  }
+
+  if ((data === "rm:send" || data === "rm:no") && isAdmin(env, chatId)) {
+    await clearButtons();
+    if (data === "rm:no") return send(env, chatId, "Нагадування скасовано.");
+    return sendReminders(env, chatId);
   }
 
   if (data === "warn:on" || data === "warn:no") {

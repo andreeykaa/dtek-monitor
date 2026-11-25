@@ -125,7 +125,7 @@ jobs:
             # меню з /broadcast бачить лише адмін
             curl -fsS --retry 4 --retry-all-errors --retry-delay 3 "$TG/setMyCommands" -H "Content-Type: application/json" \
               -d "$(jq -n --argjson c "$CMDS" --arg id "$ADMIN_CHAT_ID" \
-                '{commands:($c + [{command:"broadcast",description:"Повідомлення всім (адмін)"},{command:"stats",description:"Статистика (адмін)"}]), scope:{type:"chat",chat_id:($id|tonumber)}}')" >/dev/null
+                '{commands:($c + [{command:"broadcast",description:"Повідомлення всім (адмін)"},{command:"stats",description:"Статистика (адмін)"},{command:"remind",description:"Нагадати тим, хто не завершив реєстрацію (адмін)"}]), scope:{type:"chat",chat_id:($id|tonumber)}}')" >/dev/null
           fi
           curl -fsS --retry 4 --retry-all-errors --retry-delay 3 "$TG/setMyShortDescription" -H "Content-Type: application/json" \
             -d '{"short_description":"Сповіщення про зміни графіка відключень ДТЕК Київські електромережі за вашою адресою"}' >/dev/null
